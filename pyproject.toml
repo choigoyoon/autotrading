@@ -1,41 +1,27 @@
-[tool.pyright]
-# --- 기본 설정 ---
-# 단일 설정 파일로 통합. pyrightconfig.json 대신 이 파일을 사용합니다.
-pythonVersion = "3.10" # 프로젝트 환경에 맞춰 버전 통일
-pythonPlatform = "All"  # 여러 환경에서의 호환성을 위해 "All"로 변경
-typeCheckingMode = "basic" # 너무 엄격하지 않은 기본 모드 사용
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
 
-# --- 분석 범위 설정 ---
-include = [
-    "src",
-    "tools"
+[project]
+name = "quant-trading-suite"
+version = "0.1.0"
+authors = [
+  { name="Your Name", email="you@example.com" },
 ]
-extraPaths = ["src", "tools"] # 상위 폴더를 경로에 추가
-
-exclude = [
-    "**/__pycache__",
-    "**/node_modules",
-    ".venv-new/**",
-    "build/**",
-    "dist/**",
-    "*.egg-info/**",
-    "typings",
-    "src/analysis/takeoff_analyzer.py", # 지속적인 pyright 오류로 인해 임시 제외
-    "src/ml/training_pipeline_v2.py", # 지속적인 pyright 오류로 인해 임시 제외
-    "tools/3_training/train_platinum_xgboost.py", # 지속적인 pyright 오류로 인해 임시 제외
-    "src/ml/adaptive_learning_system.py" # 지속적인 pyright 오류로 인해 임시 제외
+description = "A comprehensive suite for quantitative trading research and execution."
+readme = "README.md"
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
 ]
-stubPath = "./typings"
 
-# --- 보고할 규칙 설정 (중요한 문제에 집중) ---
-# 'basic' 모드에서 기본적으로 활성화되지만, 명시적으로 관리합니다.
-reportOperatorIssue = true # None과의 연산 등 잠재적 런타임 오류
-reportArgumentType = true # 함수에 잘못된 타입의 인자 전달
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pyright",
+]
 
-# 기타 관리할 규칙
-reportUnusedCallResult = true # 함수의 반환 값을 사용하지 않는 경우
-reportUnusedImport = true # 사용하지 않는 import
-
-# --- 비활성화할 규칙 (노이즈 감소) ---
-reportMissingTypeStubs = false # 타입 스텁이 없는 라이브러리 경고 비활성화
-reportUnnecessaryTypeIgnoreComment = false # # type: ignore 주석 관련 경고 방지 
+[tool.setuptools.packages.find]
+where = ["src"] 
