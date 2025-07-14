@@ -5,13 +5,14 @@ import sys
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import warnings
+from typing import cast
 
 # --- 프로젝트 설정 ---
 project_root = Path(__file__).resolve().parent.parent
 sys.path.append(str(project_root))
 
-from tools.optimize_hybrid_system import get_base_signals, OptimizationConfig as BaseConfig
-from tools.backtest_ai_model import run_backtest as run_simple_backtest
+from .optimize_hybrid_system import get_base_signals, OptimizationConfig as BaseConfig
+from .backtest_ai_model import run_backtest as run_simple_backtest
 
 warnings.filterwarnings('ignore', category=FutureWarning)
 warnings.filterwarnings('ignore', category=UserWarning)
@@ -37,7 +38,7 @@ def backtest_with_dynamic_sizing(prices: pd.Series, target_exposure: pd.Series, 
     actual_exposure = target_exposure.shift(1).fillna(0)
     
     # 로그 수익률 계산
-    log_returns = np.log(prices / prices.shift(1)).fillna(0)
+    log_returns = cast(pd.Series, np.log(prices / prices.shift(1))).fillna(0)
     
     # 전략의 로그 수익률
     strategy_log_returns = actual_exposure * log_returns
@@ -64,7 +65,7 @@ def backtest_with_dynamic_sizing(prices: pd.Series, target_exposure: pd.Series, 
     sharpe_ratio = net_strategy_log_returns.mean() / net_strategy_log_returns.std() * annualization_factor if net_strategy_log_returns.std() != 0 else 0
     
     # 거래 횟수는 노출이 0이 아니었던 기간으로 계산
-    total_trades = (exposure_changes > 0).sum()
+    total_trades = (exposure_changes.astype(float) > 0).sum()
     
     return {
         "Total Return (%)": total_return * 100,

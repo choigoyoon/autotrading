@@ -31,8 +31,8 @@ class MACDZoneLabeler:
         df = df.copy()
         df['label'] = 0  # 기본값: 관망
         
-        histogram = df['macd_histogram'].values
-        labels = df['label'].values
+        histogram = df['macd_histogram'].to_numpy()
+        labels = df['label'].to_numpy()
         
         # 구역 변화점 찾기
         sign_changes = np.where(np.diff(np.sign(histogram)))[0]
@@ -133,7 +133,7 @@ def process_all_timeframes(target_timeframe: str | None = None):
         print(f"  - {file.name}")
     
     # 타임프레임 목록 (실제 파일 기준)
-    timeframes = list(timeframe_files.keys())
+    timeframes: list[str] = list(timeframe_files.keys())
     
     if target_timeframe:
         if target_timeframe in timeframes:
@@ -170,9 +170,10 @@ def process_all_timeframes(target_timeframe: str | None = None):
                     # timestamp 컬럼 찾기
                     if 'timestamp' in df.columns:
                         ts_col = 'timestamp'
-                    elif df.index.name and 'time' in df.index.name.lower():
+                    elif df.index.name and isinstance(df.index.name, str) and 'time' in df.index.name.lower():
                         # 이미 시간 관련 인덱스인 경우
                         df.index = pd.to_datetime(df.index)
+                        ts_col = None # 이미 인덱스 처리됨
                     else:
                         # 첫 번째 컬럼 시도
                         ts_col = df.columns[0]
@@ -199,10 +200,11 @@ def process_all_timeframes(target_timeframe: str | None = None):
             total = len(df_labeled)
             
             print(f"📊 '{tf}' 라벨 분포:")
-            for label, count in label_counts.items():
+            for label, count in zip(label_counts.index, label_counts.values):
                 pct = count / total * 100
-                label_name = {0: "관망", 1: "매수", -1: "매도"}.get(label, f"라벨{label}")
-                print(f"   {label_name} ({label}): {count:,}개 ({pct:.1f}%)")
+                label_int = int(label)
+                label_name = {0: "관망", 1: "매수", -1: "매도"}.get(label_int, f"라벨{label_int}")
+                print(f"   {label_name} ({label_int}): {count:,}개 ({pct:.1f}%)")
             
             # 🔥 출력 파일명 수정 (일관성 있게)
             output_file = output_dir / f"{tf}_macd_labeled.parquet"

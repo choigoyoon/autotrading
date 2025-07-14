@@ -5,26 +5,28 @@ import warnings
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import sys
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, cast, TypedDict, List
+from datetime import datetime
 
-# 프로젝트 루트 경로를 sys.path에 추가하여 src 모듈을 찾을 수 있도록 함
-project_root = Path(__file__).resolve().parents[2]
-if str(project_root) not in sys.path:
-    sys.path.append(str(project_root))
-
-# 프로젝트의 다른 모듈 import
-try:
-    # 'integrated_take_profit_system.py'가 프로젝트 루트에 있다고 가정하고 경로 수정
-    from integrated_take_profit_system import IntegratedTakeProfitSystem
-    from src.analysis.multi_timeframe_validator import MultiTimeframeValidator
-except ImportError as e:
-    print(f"필수 모듈 import 실패: {e}. 경로 설정을 확인하세요.")
-    # Fallback for basic functionality
-    IntegratedTakeProfitSystem = None
-    MultiTimeframeValidator = None
+# 리팩토링된 모듈을 src 내부에서 직접 import
+from src.strategies.take_profit_system import IntegratedTakeProfitSystem
+from src.analysis.multi_timeframe_validator import MultiTimeframeValidator
 
 warnings.filterwarnings('ignore', category=FutureWarning)
 warnings.filterwarnings('ignore', category=UserWarning)
+
+class TradeResult(TypedDict):
+    entry_timestamp: datetime
+    exit_timestamp: datetime
+    holding_period_min: float
+    label_type: str
+    label_grade: str
+    entry_price: float
+    exit_price: float
+    pnl_pct: float
+    exit_reason: str
+    is_win: int
+
 
 class IntegratedBacktestValidator:
     """
@@ -63,12 +65,12 @@ class IntegratedBacktestValidator:
         self.tp_system.prepare_analyzers()
         print("데이터 로딩 완료.")
 
-    def _run_single_trade_simulation(self, label_info: pd.Series) -> Optional[Dict[str, Any]]:
+    def _run_single_trade_simulation(self, label_info: pd.Series) -> Optional[TradeResult]:
         """단일 라벨에 대한 거래 시뮬레이션을 실행합니다."""
         if self.ohlcv_1m is None:
             return None # 데이터 미로드 시 시뮬레이션 불가
 
-        entry_timestamp = label_info['timestamp']
+        entry_timestamp = cast(pd.Timestamp, pd.to_datetime(label_info['timestamp']))
         
         # 1. 전략 가져오기
         try:
@@ -78,12 +80,19 @@ class IntegratedBacktestValidator:
             return None # 전략 생성 실패 시 거래 스킵
 
         # 2. 진입 가격 설정
-        entry_candle = self.ohlcv_1m.loc[entry_timestamp]
-        entry_price = entry_candle['low'] if label_info['label_type'] == 1 else entry_candle['high']
+        if label_info['label_type'] == 1:
+            entry_price = float(self.ohlcv_1m.at[entry_timestamp, 'low'])
+        else:
+            entry_price = float(self.ohlcv_1m.at[entry_timestamp, 'high'])
         
         # 3. 거래 기간 데이터 슬라이싱
         max_holding_minutes = int(strategy['max_holding_period_min'])
-        end_timestamp = entry_timestamp + pd.Timedelta(minutes=max_holding_minutes)
+        trade_duration = pd.to_timedelta(max_holding_minutes, unit='m')
+        
+        if pd.isna(trade_duration):
+            return None # 유효하지 않은 보유 기간
+
+        end_timestamp = entry_timestamp + trade_duration
         trade_period_df = self.ohlcv_1m.loc[entry_timestamp:end_timestamp]
 
         if trade_period_df.empty:
@@ -93,34 +102,38 @@ class IntegratedBacktestValidator:
         exit_price, exit_timestamp, exit_reason = 0.0, None, "Max Hold"
         
         tp_price = entry_price * (1 + strategy['adjusted_take_profit_pct']) if label_info['label_type'] == 1 else entry_price * (1 - strategy['adjusted_take_profit_pct'])
-        sl_price = entry_price * (1 - strategy['stop_loss_pct']) if isinstance(strategy.get('stop_loss_pct'), (int, float)) else entry_price * (1 - 0.01)  # stop_loss_pct는 음수
+        stop_loss_pct = strategy.get('stop_loss_pct', -0.02)  # 기본값 -2%
+        sl_price = entry_price * (1 + stop_loss_pct) if label_info['label_type'] == 1 else entry_price * (1 - stop_loss_pct)
         
         for idx, candle in trade_period_df.iloc[1:].iterrows(): # 진입 캔들 제외
+            current_time = cast(pd.Timestamp, idx)
             if label_info['label_type'] == 1: # 매수
                 if candle['high'] >= tp_price:
-                    exit_price, exit_timestamp, exit_reason = tp_price, idx, "Take Profit"
+                    exit_price, exit_timestamp, exit_reason = tp_price, current_time, "Take Profit"
                     break
                 if candle['low'] <= sl_price:
-                    exit_price, exit_timestamp, exit_reason = sl_price, idx, "Stop Loss"
+                    exit_price, exit_timestamp, exit_reason = sl_price, current_time, "Stop Loss"
                     break
             else: # 매도
                 if candle['low'] <= tp_price:
-                    exit_price, exit_timestamp, exit_reason = tp_price, idx, "Take Profit"
+                    exit_price, exit_timestamp, exit_reason = tp_price, current_time, "Take Profit"
                     break
                 if candle['high'] >= sl_price:
-                    exit_price, exit_timestamp, exit_reason = sl_price, idx, "Stop Loss"
+                    exit_price, exit_timestamp, exit_reason = sl_price, current_time, "Stop Loss"
                     break
 
         if exit_timestamp is None: # 최대 보유 기간 도달
-            exit_timestamp = trade_period_df.index[-1]
-            exit_price = trade_period_df['close'].iloc[-1]
+            exit_timestamp = cast(pd.Timestamp, trade_period_df.index[-1])
+            exit_price = float(trade_period_df['close'].iloc[-1])
         
+        exit_timestamp = cast(pd.Timestamp, exit_timestamp)
+
         # 5. 거래 결과 기록
         pnl_pct = (exit_price - entry_price) / entry_price if label_info['label_type'] == 1 else (entry_price - exit_price) / entry_price
         
         return {
-            'entry_timestamp': entry_timestamp,
-            'exit_timestamp': exit_timestamp,
+            'entry_timestamp': entry_timestamp.to_pydatetime(),
+            'exit_timestamp': exit_timestamp.to_pydatetime(),
             'holding_period_min': (exit_timestamp - entry_timestamp).total_seconds() / 60,
             'label_type': 'buy' if label_info['label_type'] == 1 else 'sell',
             'label_grade': strategy.get('label_grade', 'N/A'),
@@ -137,9 +150,9 @@ class IntegratedBacktestValidator:
         """
         self._load_data()
         
-        # 안전한 접근자 메서드를 사용하여 등급 데이터를 가져옴
-        labels_df = self.tp_system.bounce_analyzer.get_graded_labels()
-        if labels_df.empty:
+        # bounce_analyzer에서 직접 등급 라벨을 가져옵니다.
+        labels_df = cast(pd.DataFrame, self.tp_system.bounce_analyzer.get_graded_labels())
+        if not isinstance(labels_df, pd.DataFrame) or labels_df.empty:
             raise ValueError("라벨 등급 데이터(graded_df)를 생성할 수 없습니다.")
             
         labels_df = labels_df.copy()
@@ -148,17 +161,26 @@ class IntegratedBacktestValidator:
         if end_date:
             labels_df = labels_df[labels_df['timestamp'] <= pd.to_datetime(end_date)]
 
-        trade_results = []
+        trade_results: List[TradeResult] = []
         print(f"{len(labels_df)}개의 라벨에 대해 백테스트를 시작합니다...")
-        for _, label_info in tqdm(labels_df.iterrows(), total=len(labels_df)):
-            trade_result = self._run_single_trade_simulation(label_info)
-            if trade_result:
-                trade_results.append(trade_result)
         
-        self.all_trades = pd.DataFrame(trade_results)
-        if self.all_trades is None or self.all_trades.empty:
-            raise ValueError("백테스트 결과 생성된 거래가 없습니다.")
-            
+        # iterrows를 사용하기 전, 다시 한번 DataFrame인지 확인
+        if isinstance(labels_df, pd.DataFrame):
+            for _, label_info in tqdm(labels_df.iterrows(), total=len(labels_df)):
+                trade_result = self._run_single_trade_simulation(label_info)
+                if trade_result:
+                    trade_results.append(trade_result)
+        
+        if not trade_results:
+            print("경고: 백테스트 결과 생성된 거래가 없습니다.")
+            self.all_trades = pd.DataFrame()
+        else:
+            self.all_trades = pd.DataFrame(trade_results)
+        
+        if self.all_trades.empty:
+            print("생성된 거래가 없어 리포트를 종료합니다.")
+            return
+
         self.all_trades.to_csv(self.results_path / "full_trade_log.csv", index=False)
         print(f"백테스트 완료. 총 {len(self.all_trades)}건의 거래가 기록되었습니다.")
         
@@ -172,17 +194,24 @@ class IntegratedBacktestValidator:
         avg_return = trades_df['pnl_pct'].mean() * 100 if total_trades > 0 else 0
         
         # 최대 낙폭 (MDD) 계산
+        trades_df = trades_df.copy()
         trades_df['cumulative_pnl'] = (1 + trades_df['pnl_pct']).cumprod()
         peak = trades_df['cumulative_pnl'].expanding().max()
         drawdown = (trades_df['cumulative_pnl'] - peak) / peak
-        max_drawdown = drawdown.min() * 100
+        max_drawdown = drawdown.min() * 100 if not drawdown.empty else 0
         
         # 샤프 비율 (일 단위, 무위험 수익률 0 가정)
-        daily_returns = trades_df.set_index('exit_timestamp')['pnl_pct'].resample('D').sum()
-        sharpe_ratio = (daily_returns.mean() / (daily_returns.std() + 1e-9)) * np.sqrt(365)
+        if pd.api.types.is_datetime64_any_dtype(trades_df.index):
+            daily_returns = trades_df['pnl_pct'].resample('D').sum()
+        else:
+            daily_returns = trades_df.set_index('exit_timestamp')['pnl_pct'].resample('D').sum()
+
+        sharpe_ratio = (daily_returns.mean() / (daily_returns.std() + 1e-9)) * np.sqrt(365) if not daily_returns.empty and daily_returns.std() > 0 else 0.0
         
-        profit_factor = trades_df[trades_df['pnl_pct'] > 0]['pnl_pct'].sum() / abs(trades_df[trades_df['pnl_pct'] < 0]['pnl_pct'].sum())
-        
+        gains = trades_df[trades_df['pnl_pct'] > 0]['pnl_pct'].sum()
+        losses = abs(trades_df[trades_df['pnl_pct'] < 0]['pnl_pct'].sum())
+        profit_factor = gains / losses if losses > 0 else np.inf
+
         return pd.Series({
             '총 거래 수': total_trades,
             '승률 (%)': win_rate,
@@ -195,7 +224,7 @@ class IntegratedBacktestValidator:
 
     def validate_by_period(self):
         """기간별(연도, 분기, 시장 상황) 성과를 검증합니다."""
-        if self.all_trades is None:
+        if self.all_trades is None or self.all_trades.empty:
             raise RuntimeError("먼저 run_comprehensive_backtest()를 실행하세요.")
 
         if self.ohlcv_1m is None:
@@ -203,6 +232,7 @@ class IntegratedBacktestValidator:
 
         print("기간별 성과 분석 중...")
         trades = self.all_trades.copy()
+        trades['entry_timestamp'] = pd.to_datetime(trades['entry_timestamp'])
         trades['year'] = trades['entry_timestamp'].dt.year
         trades['quarter'] = trades['entry_timestamp'].dt.to_period('Q').astype(str)
         
@@ -233,7 +263,7 @@ class IntegratedBacktestValidator:
 
     def validate_by_grade_and_environment(self):
         """라벨 등급 및 시장 환경 점수별 성과를 검증합니다."""
-        if self.all_trades is None:
+        if self.all_trades is None or self.all_trades.empty:
             raise RuntimeError("먼저 run_comprehensive_backtest()를 실행하세요.")
         
         print("등급 및 환경별 성과 분석 중...")

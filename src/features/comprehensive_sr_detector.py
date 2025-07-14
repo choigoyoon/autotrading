@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 from sklearn.cluster import DBSCAN
-from typing import List, Dict
+from typing import List, Dict, cast
 import logging
 
 # --- 로깅 설정 ---
@@ -38,8 +38,11 @@ class ComprehensiveSRDetector:
             raise ValueError("입력 DataFrame에 'high', 'low', 'swing_high', 'swing_low' 컬럼이 필요합니다.")
 
         # '진짜' 스윙 포인트를 S/R 후보로 추출
-        supports = df[df['swing_low'] == 1]['low'].values
-        resistances = df[df['swing_high'] == 1]['high'].values
+        supports_series = df[df['swing_low'] == 1]['low']
+        resistances_series = df[df['swing_high'] == 1]['high']
+        
+        supports = cast(pd.Series, supports_series).to_numpy()
+        resistances = cast(pd.Series, resistances_series).to_numpy()
         
         if len(supports) < self.min_cluster_samples or len(resistances) < self.min_cluster_samples:
             self.logger.warning("S/R 분석을 위한 스윙 포인트가 충분하지 않습니다.")
@@ -106,8 +109,15 @@ if __name__ == '__main__':
         'high': price_data + 100 + np.random.uniform(0, 50, 500),
         'low': price_data - 100 - np.random.uniform(0, 50, 500),
         'close': price_data,
-        'volume': np.random.randint(100, 1000, 500)
+        'volume': np.random.randint(100, 1000, 500),
+        'swing_high': 0,
+        'swing_low': 0
     }, index=dates)
+
+    # 스윙 포인트 예시 설정
+    sample_df.loc[sample_df.index[105], 'swing_high'] = 1
+    sample_df.loc[sample_df.index[405], 'swing_high'] = 1
+    sample_df.loc[sample_df.index[255], 'swing_low'] = 1
 
     # 볼륨 컨펌을 위한 데이터 조작
     sample_df.loc[sample_df.index[250:260], 'volume'] = 2000

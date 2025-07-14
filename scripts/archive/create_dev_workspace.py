@@ -4,13 +4,12 @@
 350만개 데이터 프로젝트 최적화용
 """
 
-import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
-def create_dev_workspace():
+def create_dev_workspace() -> None:
     """개발용 경량 워크스페이스 생성"""
     
     # 현재 디렉토리
@@ -20,7 +19,7 @@ def create_dev_workspace():
     print(f"🚀 개발용 워크스페이스 생성 중: {dev_dir}")
     
     # 개발용 폴더 구조
-    dev_structure = {
+    dev_structure: dict[str, str] = {
         'src': 'copy',           # 코드는 복사
         'configs': 'copy',       # 설정은 복사  
         'tools': 'copy',         # 도구는 복사
@@ -35,15 +34,12 @@ def create_dev_workspace():
     dev_dir.mkdir(exist_ok=True)
     
     # 파일 복사
-    files_to_copy = [
-        'requirements.txt',
+    files_to_copy: list[str] = [
+        'pyproject.toml',
         'README.md',
-        'run_training.py',
-        'pipeline_runner.py',
-        'setup_directories.py',
-        'system_check.py',
-        '.cursorrules',
-        '.vscode'
+        'TA_Lib-0.4.28-cp310-cp310-win_amd64.whl',
+        '.cursor-project',
+        '.gitignore'
     ]
     
     for file_name in files_to_copy:
@@ -52,9 +48,9 @@ def create_dev_workspace():
         
         if src_file.exists():
             if src_file.is_dir():
-                shutil.copytree(src_file, dst_file, dirs_exist_ok=True)
+                _ = shutil.copytree(src_file, dst_file, dirs_exist_ok=True)
             else:
-                shutil.copy2(src_file, dst_file)
+                _ = shutil.copy2(src_file, dst_file)
             print(f"📁 복사: {file_name}")
     
     # 폴더 처리
@@ -67,7 +63,9 @@ def create_dev_workspace():
             
         if action == 'copy':
             # 폴더 복사
-            shutil.copytree(src_folder, dst_folder, dirs_exist_ok=True)
+            if dst_folder.exists():
+                shutil.rmtree(dst_folder)
+            _ = shutil.copytree(src_folder, dst_folder, dirs_exist_ok=False)
             print(f"📁 복사: {folder}")
             
         elif action == 'symlink':
@@ -79,23 +77,22 @@ def create_dev_workspace():
                     shutil.rmtree(dst_folder)
             
             try:
-                # Windows용 심볼릭 링크
-                if os.name == 'nt':
-                    subprocess.run([
-                        'mklink', '/D', 
-                        str(dst_folder), 
-                        str(src_folder)
-                    ], shell=True, check=True)
+                # Windows와 Unix/macOS에 맞춰 심볼릭 링크 생성
+                if sys.platform == "win32":
+                    _ = subprocess.run(
+                        ["mklink", "/D", str(dst_folder), str(src_folder)],
+                        shell=True,
+                        check=True,
+                    )
                 else:
-                    # Unix용 심볼릭 링크
-                    dst_folder.symlink_to(src_folder, target_is_directory=True)
-                    
+                    # 'linux', 'darwin'
+                    dst_folder.symlink_to(src_folder, target_is_directory=True) # type: ignore[unreachable]
+
                 print(f"🔗 심볼릭 링크: {folder}")
             except Exception as e:
                 print(f"⚠️ 심볼릭 링크 실패 ({folder}): {e}")
                 # 실패시 폴더 생성
                 dst_folder.mkdir(exist_ok=True)
-                print(f"📁 폴더 생성: {folder}")
     
     # 개발용 설정 파일 생성
     create_dev_settings(dev_dir)
@@ -104,27 +101,27 @@ def create_dev_workspace():
     print(f"📂 위치: {dev_dir}")
     print(f"💡 사용법: Cursor에서 {dev_dir} 폴더를 열어주세요")
 
-def create_dev_settings(dev_dir):
-    """개발용 설정 파일 생성"""
+def create_dev_settings(dev_dir: Path) -> None:
+    """
+    개발용 IDE(Cursor, VSCode) 설정 파일을 생성합니다.
+    
+    Args:
+        dev_dir (Path): 설정을 생성할 개발 워크스페이스 경로.
+    """
     
     # 개발용 .cursorrules
-    dev_cursorrules = dev_dir / ".cursorrules"
+    dev_cursorrules = dev_dir / ".cursor-project" # .cursorrules에서 .cursor-project로 변경
     with open(dev_cursorrules, 'w', encoding='utf-8') as f:
-        f.write("""# 개발용 Cursor 설정
+        _ = f.write("""# 개발용 Cursor 설정
 # 경량 워크스페이스용
 
-# AI 기능 활성화 (개발용)
 ai_features: full
-memory_limit: 4GB
 file_limit: 5000
 
-# 개발 환경 최적화
-development_mode: true
-auto_complete: true
-semantic_highlighting: true
-
-# 무거운 파일만 제외
 exclude_patterns:
+  - "**/node_modules"
+  - "**/.git"
+  - "**/data_backup"
   - "**/*.pt"
   - "**/*.pth"
   - "**/*.csv"
@@ -137,7 +134,7 @@ exclude_patterns:
     
     dev_settings = dev_vscode_dir / "settings.json"
     with open(dev_settings, 'w', encoding='utf-8') as f:
-        f.write("""{
+        _ = f.write("""{
     // 개발용 최적화 설정
     "files.watcherExclude": {
         "**/*.pt": true,
@@ -168,12 +165,12 @@ exclude_patterns:
     
     print("⚙️ 개발용 설정 파일 생성 완료")
 
-def create_data_cleanup_script():
+def create_data_cleanup_script() -> None:
     """데이터 정리 스크립트 생성"""
     
-    cleanup_script = Path("cleanup_heavy_data.py")
+    cleanup_script = Path.cwd() / "dev_workspace" / "cleanup_heavy_data.py"
     with open(cleanup_script, 'w', encoding='utf-8') as f:
-        f.write("""#!/usr/bin/env python3
+        _ = f.write("""#!/usr/bin/env python3
 \"\"\"
 무거운 데이터 파일 정리 스크립트
 Cursor 성능 최적화용
@@ -228,8 +225,8 @@ if __name__ == "__main__":
         print("\n" + "="*50)
         print("🎯 다음 단계:")
         print("1. Cursor를 재시작하세요")
-        print("2. dev_workspace 폴더를 Cursor에서 열어주세요")
-        print("3. 필요시 cleanup_heavy_data.py를 실행하세요")
+        print("2. 'dev_workspace' 폴더를 Cursor에서 열어주세요")
+        print("3. 필요시 'python cleanup_heavy_data.py'를 실행하세요")
         print("="*50)
         
     except Exception as e:

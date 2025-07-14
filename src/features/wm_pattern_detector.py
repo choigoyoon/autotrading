@@ -2,6 +2,13 @@ import pandas as pd
 from scipy.signal import find_peaks
 from typing import List, Dict
 import numpy as np
+import sys
+from pathlib import Path
+
+# 프로젝트 루트를 sys.path에 추가
+project_root = Path(__file__).resolve().parents[2]
+if str(project_root) not in sys.path:
+    sys.path.append(str(project_root))
 
 class WMPatternDetector:
     """
@@ -87,9 +94,10 @@ class WMPatternDetector:
             return []
 
         for i in range(len(lows_indices) - 2):
-            l1_idx, l2_idx, l3_idx = lows_indices[i:i+3]
+            idx_array = lows_indices[i:i+3]
+            l1_idx, l2_idx, l3_idx = idx_array
             
-            l1_val, l2_val, l3_val = -macd_hist_series.iloc[[l1_idx, l2_idx, l3_idx]]
+            l1_val, l2_val, l3_val = -macd_hist_series.iloc[idx_array].to_numpy()
 
             if not self._validate_w_structure(l1_val, l2_val, l3_val):
                 continue
@@ -130,11 +138,10 @@ class WMPatternDetector:
         return []
 
 if __name__ == '__main__':
-    from pathlib import Path
-    import sys
     import matplotlib.pyplot as plt
 
     # --- 실제 데이터로 W 패턴 탐지 및 검증 ---
+    data_file = None 
 
     # 1. 프로젝트 경로 설정 및 모듈 임포트
     project_root = Path(__file__).resolve().parent.parent.parent

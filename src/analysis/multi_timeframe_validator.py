@@ -1,13 +1,27 @@
 import pandas as pd
 from pathlib import Path
 import warnings
+import sys
+
+# 프로젝트 루트를 sys.path에 추가
+project_root = Path(__file__).resolve().parents[2]
+if str(project_root) not in sys.path:
+    sys.path.append(str(project_root))
 
 # pandas-ta가 설치되어 있다고 가정합니다. 만약 없다면, 간단한 구현으로 대체합니다.
 try:
-    import pandas_ta as ta  # pyright: ignore[reportUnusedImport]
+    import pandas_ta as ta # type: ignore
     PANDAS_TA_AVAILABLE = True
 except ImportError:
     PANDAS_TA_AVAILABLE = False
+    class ta_mock: # 이름 충돌 방지를 위해 클래스 이름 변경
+        @staticmethod
+        def ema(*args, **kwargs): pass
+        @staticmethod
+        def macd(*args, **kwargs): pass
+        @staticmethod
+        def rsi(*args, **kwargs): pass
+    ta = ta_mock() # 인스턴스 할당
 
 warnings.filterwarnings('ignore', category=FutureWarning)
 
@@ -73,9 +87,7 @@ class MultiTimeframeValidator:
             raise RuntimeError("데이터가 로드되지 않았습니다. _load_data()를 먼저 실행하세요.")
 
         print("기술 지표 계산 중...")
-        if not PANDAS_TA_AVAILABLE:
-            print("경고: 'pandas-ta' 라이브러리를 찾을 수 없습니다. 기본적인 지표만 계산됩니다.")
-
+        
         for tf, df in self.dataframes.items():
             if PANDAS_TA_AVAILABLE:
                 df.ta.ema(length=20, append=True, col_names=(f"EMA_20",))
@@ -84,6 +96,7 @@ class MultiTimeframeValidator:
                 df.ta.rsi(append=True)
             else:
                 # pandas-ta가 없을 경우, 간단한 EMA/MACD/RSI 계산
+                print(f"경고: {tf}에 대해 'pandas-ta' 없이 기본 지표 계산 중...")
                 df['EMA_20'] = df['close'].ewm(span=20, adjust=False).mean()
                 df['EMA_50'] = df['close'].ewm(span=50, adjust=False).mean()
                 ema_12 = df['close'].ewm(span=12, adjust=False).mean()
@@ -94,8 +107,11 @@ class MultiTimeframeValidator:
                 delta = df['close'].diff()
                 gain = (delta.where(delta > 0, 0)).ewm(alpha=1/14, adjust=False).mean()
                 loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, adjust=False).mean()
-                rs = gain / (loss + 1e-9)
-                df['RSI_14'] = 100 - (100 / (1 + rs))
+                if not loss.eq(0).all():
+                    rs = gain / loss.where(loss != 0, 1e-9)
+                    df['RSI_14'] = 100 - (100 / (1 + rs))
+                else:
+                    df['RSI_14'] = 100
 
     def analyze_single_timeframe(self, tf: str, at_timestamp=None) -> dict:
         """단일 타임프레임의 상태를 분석합니다."""
@@ -108,11 +124,18 @@ class MultiTimeframeValidator:
         else:
             data = df.iloc[-1]
 
+        # MACD 컬럼 이름이 pandas_ta 기본값(MACDh_12_26_9)과 일치하는지 확인
+        macd_hist_col = 'MACDh_12_26_9'
+        rsi_col = 'RSI_14'
+
+        if macd_hist_col not in data.index or rsi_col not in data.index:
+            return {"error": f"{tf}에서 필요한 지표({macd_hist_col}, {rsi_col})를 찾을 수 없음"}
+
         trend = "up" if data['EMA_20'] > data['EMA_50'] else "down"
-        macd_signal = "bullish" if data['MACDh_12_26_9'] > 0 else "bearish"
+        macd_signal = "bullish" if data[macd_hist_col] > 0 else "bearish"
         
         # RSI를 이용한 신호 강도 계산 (0~1 사이 값, 50을 기준으로 멀어질수록 강함)
-        rsi_val = data['RSI_14']
+        rsi_val = data[rsi_col]
         strength = abs(rsi_val - 50) / 50
 
         return {

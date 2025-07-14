@@ -1,7 +1,8 @@
 import torch
 import torch.optim as optim
 import numpy as np
-from typing import Dict, Optional, Deque
+from numpy import typing as npt
+from typing import Dict, Optional, Deque, Any, DefaultDict
 from pathlib import Path
 import json
 import pandas as pd
@@ -17,11 +18,11 @@ class MarketRegimeDetector:
     def __init__(self, lookback: int = 100):
         self.lookback = lookback
         self.regimes = ['trending_up', 'trending_down', 'ranging', 'volatile', 'low_volatility']
-    
-    def detect_regime(self, ohlcv: Dict[str, np.ndarray]) -> str:
+
+    def detect_regime(self, ohlcv: Dict[str, np.ndarray[Any, Any]]) -> str:
         """
-        Detect current market regime based on OHLCV data
-        
+        현재 OHLCV 데이터로부터 시장의 regime(상태)을 감지합니다.
+
         Args:
             ohlcv: Dictionary with 'open', 'high', 'low', 'close', 'volume' keys
             
@@ -148,19 +149,17 @@ class ModelEnsemble:
         
         # Loss function
         self.loss_fn = RiskAdjustedLoss(loss_config)
-        
         # Training history
-        self.history = {
+        self.history: Dict[str, DefaultDict[str, list[float]]] = {
             'train': defaultdict(list),
             'val': defaultdict(list)
         }
-    
     def predict(
         self,
         x: Dict[str, torch.Tensor],
         regime: str,
         use_ema: bool = False
-    ) -> Dict[str, torch.Tensor]:
+    ) -> Dict[str, npt.NDArray[np.float64]]:
         """Make prediction using the model for the given regime"""
         model = self.models[regime]
         _ = model.eval()
@@ -176,7 +175,7 @@ class ModelEnsemble:
             outputs = model(x_device)
             
             # Convert to CPU and numpy for easier handling
-            predictions = {
+            predictions: Dict[str, npt.NDArray[np.float64]] = {
                 k: v.cpu().numpy() if isinstance(v, torch.Tensor) else v
                 for k, v in outputs.items()
             }
@@ -292,7 +291,11 @@ class AdaptiveLearningSystem:
         self.regime_history: Deque[str] = deque(maxlen=100)
         self.performance_metrics: Dict[str, float] = {}
         self.performance_history: Deque[float] = deque(maxlen=100)
-        self.performance_log = pd.DataFrame()
+        self.performance_log: Deque[Any] = deque(maxlen=100)
+        self.history: Dict[str, defaultdict[str, list[float]]] = {
+            'train': defaultdict(list),
+            'val': defaultdict(list)
+        }
 
     def update(self, metrics: Dict[str, float]):
         """Update system based on recent performance"""
@@ -309,31 +312,37 @@ class AdaptiveLearningSystem:
         self,
         batch,
         is_training: bool
-    ) -> tuple[dict[str, float], dict[str, np.ndarray] | None, str]:
-        """Process a single batch of data"""
+    ) -> tuple[dict[str, float], dict[str, npt.NDArray[np.float64]] | None, str]:
+        """Process a single batch of data for training or validation."""
+        
+        # Unpack batch and determine regime
         x, y, returns, ohlcv = batch
         
         # Detect regime
         regime = self.regime_detector.detect_regime(ohlcv)
-        
-        if is_training:
-            metrics = self.ensemble.train_step(x, y, regime, returns)
-            return metrics, None, regime
-        else:
+
+        # Get predictions if not training
+        predictions: Optional[Dict[str, npt.NDArray[np.float64]]] = None
+        if not is_training:
             predictions = self.ensemble.predict(x, regime)
-            
-            # Since validation loss is needed, calculate it here
-            # This requires moving data to device again inside loss_fn
-            y_device = {k: v.to(self.device) for k, v in y.items()}
+
+        # Since validation loss is needed, calculate it here
+        # This requires moving data to device again inside loss_fn
+        y_device = {k: v.to(self.device) for k, v in y.items()}
+        if returns is not None:
             returns_device = returns.to(self.device)
-            
-            # Re-create model outputs as tensors on the correct device
+        else:
+            returns_device = None
+
+        # Re-create model outputs as tensors on the correct device
+        outputs_device = {}
+        if predictions is not None:
             outputs_device = {k: torch.tensor(v, device=self.device) for k, v in predictions.items()}
-            
-            metrics = self.ensemble.loss_fn(outputs_device, y_device, returns_device)
-            metrics_items = {k: v.item() for k, v in metrics.items()}
-            
-            return metrics_items, predictions, regime
+        
+        metrics = self.ensemble.loss_fn(outputs_device, y_device, returns_device)
+        metrics_items = {k: v.item() for k, v in metrics.items()}
+        
+        return metrics_items, predictions, regime
 
     def save(self, path: Optional[Path] = None):
         """Save the entire adaptive system state"""
@@ -350,26 +359,28 @@ class AdaptiveLearningSystem:
         print(f"Adaptive system saved to {path}")
 
     @classmethod
-    def load(cls, path: Path, device: torch.device = None):
-        """Load the adaptive system state"""
-        if device is None:
-            device = torch.device("cpu")
-            
-        checkpoint = torch.load(path, map_location=device)
+    def load(cls, path: Path, device: Optional[torch.device] = None):
+        """Load the system from a saved checkpoint."""
         
-        system = cls(
-            model_config=ModelConfig.from_dict(checkpoint['model_config']),
-            loss_config=LossConfig.from_dict(checkpoint['loss_config']),
-            device=device
+        # 디바이스가 지정되지 않으면 자동으로 CPU를 사용
+        effective_device = device if device is not None else torch.device("cpu")
+        
+        checkpoint = torch.load(path, map_location=effective_device)
+        
+        model_config = ModelConfig(**checkpoint['config']['model'])
+        loss_config = LossConfig(**checkpoint['config']['loss'])
+        
+        instance = cls(
+            model_config=model_config,
+            loss_config=loss_config,
+            device=effective_device,
+            model_dir=str(path.parent)
         )
         
-        for regime, state_dict in checkpoint['ensemble_state'].items():
-            system.ensemble.models[regime].load_state_dict(state_dict)
-            
-        for regime, state_dict in checkpoint['optimizer_states'].items():
-            system.ensemble.optimizers[regime].load_state_dict(state_dict)
-            
-        system.performance_log = checkpoint['performance_log']
+        instance.ensemble.load_models(path.parent)
         
-        print(f"Adaptive system loaded from {path}")
-        return system
+        if 'history' in checkpoint:
+            instance.history = checkpoint['history']
+            
+        print(f"AdaptiveLearningSystem loaded from {path}")
+        return instance

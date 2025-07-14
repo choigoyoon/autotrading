@@ -1,11 +1,21 @@
 import pandas as pd
 import numpy as np
 from pathlib import Path
-import joblib  # type: ignore[import-untyped]
-from sklearn.preprocessing import MinMaxScaler
+import joblib  # type: ignore[reportMissingTypeStubs]
+from sklearn.preprocessing import MinMaxScaler  # type: ignore[reportMissingTypeStubs]
 from tqdm import tqdm
 from typing import cast
 from numpy.typing import NDArray
+
+def handle_timezone(df: pd.DataFrame) -> pd.DataFrame:
+    """DataFrame의 인덱스를 타임존이 인식되는 UTC로 통일합니다."""
+    if not isinstance(df.index, pd.DatetimeIndex):
+        df.index = pd.to_datetime(df.index, utc=True)
+    elif df.index.tz is None:
+        df.index = df.index.tz_localize('UTC')
+    else:
+        df.index = df.index.tz_convert('UTC')
+    return df
 
 def create_sequences(
     data: NDArray[np.float64], 
@@ -19,22 +29,18 @@ def create_sequences(
     sequences: list[NDArray[np.float64]] = []
     labels: list[NDArray[np.float64]] = []
     
-    for i in tqdm(range(len(data) - sequence_length), desc="시퀀스 생성 중"):
-        seq: NDArray[np.float64] = data[i:i+sequence_length][:, feature_cols_indices]
+    for i in tqdm(range(len(data) - sequence_length), desc="시퀀스 생성 중", unit="seq"):
+        seq: NDArray[np.float64] = data[i:i+sequence_length, feature_cols_indices]
         
-        # numpy 슬라이싱 결과는 스칼라 또는 배열일 수 있음
-        label_raw: float | NDArray[np.float64] = data[i+sequence_length-1][label_cols_indices]
-        
-        if isinstance(label_raw, np.ndarray):
-            label: NDArray[np.float64] = label_raw.astype(np.float64)
-        else:
-            label = np.array([label_raw], dtype=np.float64)
+        # fancy indexing with a list of indices always returns an array
+        label_raw: NDArray[np.float64] = data[i + sequence_length - 1, label_cols_indices]
+        label: NDArray[np.float64] = label_raw.astype(np.float64)
         
         sequences.append(seq)
         labels.append(label)
     
-    sequences_array = np.array(sequences, dtype=np.float64)
-    labels_array = np.array(labels, dtype=np.float64)
+    sequences_array: NDArray[np.float64] = np.array(sequences, dtype=np.float64)
+    labels_array: NDArray[np.float64] = np.array(labels, dtype=np.float64)
     
     return sequences_array, labels_array
 
@@ -44,9 +50,12 @@ def validate_data_shapes(X: NDArray[np.float64], y: NDArray[np.float64]) -> tupl
         y = y.reshape(-1, 1)
         print(f"⚠️  y shape을 LSTM 호환 형태로 변환: {y.shape}")
     
-    assert X.shape[0] == y.shape[0], f"샘플 수 불일치: X={X.shape[0]}, y={y.shape[0]}"
-    assert X.ndim == 3, f"X는 3차원 배열이어야 함: 현재 {X.ndim}차원"
-    assert y.ndim == 2, f"y는 2차원 배열이어야 함: 현재 {y.ndim}차원"
+    if not (X.shape[0] == y.shape[0]):
+        raise ValueError(f"샘플 수 불일치: X={X.shape[0]}, y={y.shape[0]}")
+    if not X.ndim == 3:
+        raise ValueError(f"X는 3차원 배열이어야 함: 현재 {X.ndim}차원")
+    if not y.ndim == 2:
+        raise ValueError(f"y는 2차원 배열이어야 함: 현재 {y.ndim}차원")
     
     print(f"✅ 데이터 shape 검증 완료: X={X.shape}, y={y.shape}")
     return X, y
@@ -61,63 +70,61 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     
     print("📂 데이터 로딩...")
-    features_df: pd.DataFrame = pd.read_parquet(features_path)
-    labels_df: pd.DataFrame = pd.read_parquet(labels_path)
+    try:
+        features_df_raw: pd.DataFrame = pd.read_parquet(features_path)
+        labels_df_raw: pd.DataFrame = pd.read_parquet(labels_path)
+    except FileNotFoundError as e:
+        print(f"❌ 오류: 파일을 찾을 수 없습니다 - {e}")
+        return
     
-    # 타임존 통일
-    if not isinstance(features_df.index, pd.DatetimeIndex):
-        features_df.index = pd.to_datetime(features_df.index, utc=True)
-    features_df.index = features_df.index.tz_convert('UTC')
-    
-    if not isinstance(labels_df.index, pd.DatetimeIndex):
-        labels_df.index = pd.to_datetime(labels_df.index, utc=True)
-    labels_df.index = labels_df.index.tz_convert('UTC')
+    print("🕰️  타임존 통일 (UTC)...")
+    features_df = handle_timezone(features_df_raw)
+    labels_df = handle_timezone(labels_df_raw)
 
     print("🔄 데이터 병합 중...")
-    merged_data: pd.DataFrame = pd.merge(
-        features_df, 
-        labels_df[['trade_type']], 
-        left_index=True, 
-        right_index=True, 
-        how='inner'
+    merged_df: pd.DataFrame = pd.merge(
+        features_df,
+        labels_df[["trade_type"]],
+        left_index=True,
+        right_index=True,
+        how="inner",
     )
-    
-    data_with_dummies = pd.get_dummies(merged_data, columns=['type', 'timeframe', 'trade_type'], drop_first=True)
-    data = cast(pd.DataFrame, data_with_dummies)
 
-    feature_cols: list[str] = [col for col in data.columns if 'trade_type' not in col]
-    label_cols: list[str] = [col for col in data.columns if 'trade_type' in col]
+    data_with_dummies = pd.get_dummies(
+        merged_df, columns=["type", "timeframe", "trade_type"], drop_first=True, dtype=float
+    ) # type: ignore[reportUnknownMemberType]
+    data: pd.DataFrame = data_with_dummies
+
+    feature_cols: list[str] = [col for col in data.columns if "trade_type" not in col]
+    label_cols: list[str] = [col for col in data.columns if "trade_type" in col]
 
     print(f"📊 피처 컬럼 수: {len(feature_cols)}")
     print(f"📊 라벨 컬럼 수: {len(label_cols)}")
 
     print("📏 데이터 정규화 중...")
     scaler = MinMaxScaler()
-    
-    # .values 는 NDArray[Any]를 반환할 수 있으므로, 명시적으로 float64로 변환
-    scaler_input: NDArray[np.float64] = data[feature_cols].values.astype(np.float64)
-    scaled_features_result = scaler.fit_transform(scaler_input)
-    # fit_transform 결과는 NDArray이므로 cast
-    scaled_features = cast(NDArray[np.float64], scaled_features_result)
 
-    _ = joblib.dump(scaler, output_dir / 'sequence_scaler.joblib')
-    
+    scaler_input = data[feature_cols].to_numpy(dtype=np.float64)
+    scaled_features = scaler.fit_transform(scaler_input)  # type: ignore[reportUnknownMemberType]
+
+    _ = joblib.dump(scaler, output_dir / "sequence_scaler.joblib")  # type: ignore[reportUnknownMemberType]
+
     data_scaled = data.copy()
     data_scaled[feature_cols] = scaled_features
-    
-    feature_cols_indices: list[int] = [cast(int, data.columns.get_loc(c)) for c in feature_cols]
-    label_cols_indices: list[int] = [cast(int, data.columns.get_loc(c)) for c in label_cols]
+
+    feature_cols_indices: list[int] = [
+        cast(int, data.columns.get_loc(c)) for c in feature_cols
+    ]
+    label_cols_indices: list[int] = [
+        cast(int, data.columns.get_loc(c)) for c in label_cols
+    ]
 
     sequence_length: int = 60
-    
-    # .values 는 NDArray[Any]를 반환할 수 있으므로, 명시적으로 float64로 변환
-    data_values: NDArray[np.float64] = data_scaled.values.astype(np.float64)
-    
+
+    data_values = data_scaled.to_numpy(dtype=np.float64)
+
     X, y = create_sequences(
-        data_values, 
-        feature_cols_indices, 
-        label_cols_indices,
-        sequence_length
+        data_values, feature_cols_indices, label_cols_indices, sequence_length
     )
     
     x_validated, y_validated = validate_data_shapes(X, y)
@@ -128,7 +135,7 @@ def main() -> None:
     print(f"   X dtype: {x_validated.dtype}")
     print(f"   y dtype: {y_validated.dtype}")
     
-    metadata = {
+    metadata: dict[str, object] = {
         'feature_cols': feature_cols,
         'label_cols': label_cols,
         'sequence_length': sequence_length,
@@ -138,12 +145,11 @@ def main() -> None:
     }
     
     print("💾 시퀀스 데이터 저장 중...")
-    np.save(output_dir / 'sequences_X.npy', x_validated)
-    np.save(output_dir / 'sequences_y.npy', y_validated)
-    _ = joblib.dump(metadata, output_dir / 'metadata.joblib')
+    np.save(output_dir / "sequences_X.npy", x_validated)
+    np.save(output_dir / "sequences_y.npy", y_validated)
+    _ = joblib.dump(metadata, output_dir / "metadata.joblib")  # type: ignore[reportUnknownMemberType]
     
     print(f"✅ 시퀀스 데이터 생성 완료! 저장 위치: {output_dir}")
-    print(f"📋 저장된 파일:")
     print(f"   - sequences_X.npy: 피처 시퀀스 데이터")
     print(f"   - sequences_y.npy: 라벨 데이터")
     print(f"   - metadata.joblib: 메타데이터 (피처 컬럼 포함)")

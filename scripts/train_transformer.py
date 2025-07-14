@@ -20,7 +20,7 @@ def setup_cuda_optimization():
     """CUDA 환경 최적화"""
     if torch.cuda.is_available():
         print(f"🔥 GPU: {torch.cuda.get_device_name()}")
-        print(f"   CUDA: {torch.version.cuda}, 메모리: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+        print(f"   CUDA: {torch.version.cuda}, 메모리: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB") # type: ignore
         torch.backends.cudnn.benchmark = True
         torch.backends.cudnn.deterministic = False
         torch.cuda.empty_cache()
@@ -295,7 +295,7 @@ def run_validation_epoch(model, loader, device, epoch_num, total_epochs):
             
             # 신호 카운트
             for i in range(3):
-                signal_counts[i] += (preds == i).sum().item()
+                signal_counts[i] += int((preds == i).sum().item())
             
             all_confidences.extend(confidence.cpu().numpy())
             
@@ -504,5 +504,4 @@ def main():
     print(f"📁 모델: {config.MODEL_DIR / config.MODEL_NAME}")
 
 if __name__ == '__main__':
-    torch.multiprocessing.set_start_method('spawn', force=True)
     main()

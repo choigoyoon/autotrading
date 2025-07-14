@@ -1,7 +1,9 @@
 import re
-from typing import Any
+import logging
+from typing import Any, Union
 from pathlib import Path
 import pandas as pd
+from loguru import logger
 
 def get_timeframe_category(timeframe: str) -> str:
     """
@@ -75,10 +77,25 @@ def filename_str_to_timeframe(filename_tf_part: str) -> str:
 
 # 다른 헬퍼 함수들도 여기에 추가 가능
 # 예시:
-def safe_division(numerator, denominator, default_val=0.0):
+def safe_division(
+    numerator: Union[int, float], 
+    denominator: Union[int, float], 
+    default_val: float = 0.0
+) -> float:
+    """
+    0으로 나누는 것을 방지하는 안전한 나누기 함수.
+    
+    Args:
+        numerator (Union[int, float]): 분자.
+        denominator (Union[int, float]): 분모.
+        default_val (float, optional): 분모가 0일 때 반환할 기본값. Defaults to 0.0.
+
+    Returns:
+        float: 나눗셈 결과.
+    """
     if denominator == 0:
         return default_val
-    return numerator / denominator 
+    return float(numerator / denominator)
 
 def get_project_root() -> Path:
     """프로젝트 루트 디렉토리를 반환합니다."""
@@ -92,9 +109,9 @@ def safe_numeric_conversion(value: Any, context: str = "") -> float | None:
     try:
         numeric_value = pd.to_numeric(value, errors='raise')
         if pd.isna(numeric_value):
-            # logging.warning(f"NA value found in safe_numeric_conversion: {context}")
+            logger.warning(f"NA value found in safe_numeric_conversion: {context}")
             return None
         return float(numeric_value)
-    except (ValueError, TypeError):
-        # logging.error(f"Type conversion failed for {context}: {e}")
+    except (ValueError, TypeError) as e:
+        logger.error(f"Type conversion failed for {context}: value='{value}', error={e}")
         return None 

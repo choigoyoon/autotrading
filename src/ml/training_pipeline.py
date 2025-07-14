@@ -3,12 +3,12 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split # type: ignore
 import numpy as np
-from typing import Dict, Any
+from typing import Dict, Any, List
 
-from data_preprocessor import MultiTimeframeDataPreprocessor
-from multi_timeframe_predictor import MultiTimeframePredictor
+from .data_preprocessor import MultiTimeframeDataPreprocessor
+from .multi_timeframe_predictor import MultiTimeframePredictor
 
 class TrainingPipeline:
     """
@@ -17,9 +17,11 @@ class TrainingPipeline:
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        timeframes: List[str] = self.config.get("timeframes", [])
         self.model = MultiTimeframePredictor(
-            num_timeframes=len(config.get("timeframes")),
-            input_features=config.get("input_features", 5)
+            num_timeframes=len(timeframes),
+            input_features=self.config.get("input_features", 5)
         ).to(self.device)
 
     def run(self):
@@ -33,10 +35,17 @@ class TrainingPipeline:
         if not features:
             print("No data to train on. Exiting.")
             return
-
-        X_train, X_test, y_train, y_test, returns_train, returns_test = train_test_split(
-            features, labels, returns, test_size=0.2, random_state=42, stratify=labels
-        )
+        
+        # stratify를 위해 labels가 비어있지 않은지 확인
+        if not labels:
+            print("No labels to stratify on. Splitting without stratification.")
+            X_train, X_test, y_train, y_test, returns_train, returns_test = train_test_split(
+                features, labels, returns, test_size=0.2, random_state=42
+            )
+        else:
+            X_train, X_test, y_train, y_test, returns_train, returns_test = train_test_split(
+                features, labels, returns, test_size=0.2, random_state=42, stratify=labels
+            )
 
         # PyTorch DataLoader 생성
         train_loader = self._create_dataloader(X_train, y_train, returns_train, self.config.get("batch_size", 32))

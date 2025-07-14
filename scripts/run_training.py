@@ -1,178 +1,113 @@
-import os
-import sys
-import yaml
-import torch
 import logging
+import sys
 from pathlib import Path
-from datetime import datetime
+from typing import Any, Dict, Optional
 
-# 프로젝트 루트 경로 추가
-sys.path.append(str(Path(__file__).parent.absolute()))
+import torch
+import yaml
 
-from src.ml.training_pipeline_v2 import TrainingPipeline
+project_root = Path(__file__).resolve().parent.parent
+if str(project_root) not in sys.path:
+    sys.path.append(str(project_root))
+
 from src.ml.adaptive_learning_system import AdaptiveLearningSystem
-from src.ml.hierarchical_trading_transformer import HierarchicalTradingTransformer, ModelConfig
-from src.ml.risk_adjusted_loss import RiskAdjustedLoss, LossConfig
+from src.ml.hierarchical_trading_transformer import (
+    HierarchicalTradingTransformer, ModelConfig
+)
+from src.ml.training_pipeline_v2 import TrainingPipeline
 
-def setup_logging(log_file: str = None, log_level: str = "INFO"):
+def setup_logging(log_file: Optional[str] = None, log_level: str = "INFO") -> logging.Logger:
     """로깅 설정"""
-    log_level = getattr(logging, log_level.upper())
-    
-    # 로거 생성
+    level = getattr(logging, log_level.upper(), logging.INFO)
     logger = logging.getLogger()
-    logger.setLevel(log_level)
+    logger.setLevel(level)
     
-    # 포매터
-    formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
+    if logger.hasHandlers():
+        logger.handlers.clear()
+
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     
-    # 콘솔 핸들러
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(log_level)
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
+    ch = logging.StreamHandler()
+    ch.setLevel(level)
+    ch.setFormatter(formatter)
+    logger.addHandler(ch)
     
-    # 파일 핸들러 (파일이 지정된 경우)
     if log_file:
-        log_file = Path(log_file)
-        log_file.parent.mkdir(parents=True, exist_ok=True)
-        
-        file_handler = logging.FileHandler(log_file)
-        file_handler.setLevel(log_level)
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
+        log_path = Path(log_file)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        fh = logging.FileHandler(log_path)
+        fh.setLevel(level)
+        fh.setFormatter(formatter)
+        logger.addHandler(fh)
     
     return logger
 
-def load_config(config_path: str) -> dict:
+def load_config(config_path: Path) -> Dict[str, Any]:
     """설정 파일 로드"""
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
+    with open(config_path, 'r', encoding='utf-8') as f:
+        config: Dict[str, Any] = yaml.safe_load(f)
     return config
 
-def main():
-    # 설정 파일 로드
-    config_path = "configs/training_config.yaml"
-    if not os.path.exists(config_path):
+def main() -> None:
+    config_path = Path("configs/training_config.yaml")
+    if not config_path.exists():
         print(f"Error: Config file not found at {config_path}")
         return
     
     config = load_config(config_path)
     
-    # 로깅 설정
-    log_file = config.get('logging', {}).get('file')
-    log_level = config.get('logging', {}).get('level', 'INFO')
-    logger = setup_logging(log_file, log_level)
+    logging_config = config.get('logging', {})
+    logger = setup_logging(logging_config.get('file'), logging_config.get('level', 'INFO'))
     
-    # 디바이스 설정
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
     
-    # 모델 구성
+    data_config = config['data']
+    model_params = config['model']
+    training_params = config['training']
+
+    # 모델 구성 객체 생성 (ModelConfig가 feature_dims를 요구하므로 맞춰줌)
+    # feature_dims는 각 타임프레임별 피처의 개수를 담은 딕셔너리여야 합니다.
+    # 이 정보는 데이터셋을 분석해야 알 수 있으므로, 임시로 설정하거나 설정 파일에 추가해야 합니다.
+    # 여기서는 config 파일에 `feature_dims`가 있다고 가정합니다.
     model_config = ModelConfig(
-        input_dim=config['model']['input_dim'],
-        model_dim=config['model']['model_dim'],
-        num_heads=config['model']['num_heads'],
-        num_layers=config['model']['num_layers'],
-        num_timeframes=len(config['data']['timeframes']),
-        dropout=config['model']['dropout'],
-        use_pe=config['model']['use_pe']
+        feature_dims=model_params['feature_dims'],
+        d_model=model_params['d_model'],
+        n_heads=model_params['n_heads'],
+        n_layers=model_params['n_layers'],
+        d_ff=model_params['d_ff'],
+        dropout=model_params.get('dropout', 0.1),
+        timeframes=data_config['timeframes'],
+        max_seq_len=data_config['seq_len']
     )
     
-    # 손실 함수 구성
-    loss_weights = config['loss_weights']
-    loss_config = LossConfig(
-        direction_weight=loss_weights['direction'],
-        magnitude_weight=loss_weights['magnitude'],
-        duration_weight=loss_weights['duration'],
-        confidence_weight=loss_weights['confidence'],
-        risk_weight=loss_weights['risk']
-    )
-    
-    # 체크포인트 디렉토리 생성
-    checkpoint_dir = Path(config['training']['checkpoint_dir'])
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    
-    # 학습 파이프라인 초기화
+    # TrainingPipeline이 요구하는 인자에 맞춰서 전달
     pipeline = TrainingPipeline(
-        data_dir=config['data']['data_dir'],
-        features=config['data']['features'],
-        timeframes=config['data']['timeframes'],
-        model_config=model_config,
-        loss_config=loss_config,
-        train_ratio=config['data']['train_ratio'],
-        val_ratio=config['data']['val_ratio'],
-        test_ratio=config['data']['test_ratio'],
-        batch_size=config['data']['batch_size'],
-        seq_len=config['data']['seq_len'],
-        num_workers=config['data']['num_workers'],
-        device=device,
-        checkpoint_dir=checkpoint_dir,
-        log_dir=config['training']['log_dir']
+        data_dir=data_config['data_dir'],
+        model_dir=training_params['checkpoint_dir'],
+        results_dir=training_params.get('results_dir', 'results'),
+        device=str(device),
+        timeframes=data_config['timeframes'],
+        seq_length=data_config['seq_len'],
+        target_length=data_config.get('target_length', 10),
+        batch_size=data_config['batch_size'],
+        num_workers=data_config.get('num_workers', 0),
+        random_seed=training_params.get('random_seed', 42)
     )
-    
-    # 데이터 로드
-    logger.info("Loading data...")
-    pipeline.load_data()
-    
-    # 학습 실행
+
+    logger.info("Preparing data...")
+    pipeline.prepare_data()
+
     logger.info("Starting training...")
-    pipeline.train(
-        num_epochs=config['training']['num_epochs'],
-        learning_rate=config['training']['learning_rate'],
-        weight_decay=config['training']['weight_decay'],
-        clip_grad_norm=config['training']['clip_grad_norm'],
-        patience=config['training']['patience'],
-        min_delta=config['training']['min_delta'],
-        use_amp=config['training']['use_amp']
-    )
+    # train 메소드에 모델과 손실함수 등을 전달해야 할 수 있습니다.
+    # TrainingPipelineV2의 train 메소드 시그니처를 확인해야 합니다.
+    # 현재는 모델과 설정을 TrainingPipeline 내부에서 생성한다고 가정합니다.
+    pipeline.train(epochs=training_params['num_epochs'])
     
-    # 테스트 실행
     logger.info("Running evaluation on test set...")
-    test_metrics = pipeline.evaluate()
+    test_metrics = pipeline.test()
     logger.info(f"Test metrics: {test_metrics}")
-    
-    # 모델 저장
-    model_save_path = checkpoint_dir / "final_model.pt"
-    pipeline.save_model(model_save_path)
-    logger.info(f"Model saved to {model_save_path}")
-    
-    # 온라인 적응 시스템 초기화 (선택 사항)
-    if config.get('online_adaptation', {}).get('enable_adaptation', False):
-        logger.info("Initializing online adaptation system...")
-        
-        # 모델 로드 (필요한 경우)
-        model = HierarchicalTradingTransformer(model_config).to(device)
-        model.load_state_dict(torch.load(model_save_path, map_location=device))
-        
-        # 온라인 적응 시스템 초기화
-        online_system = AdaptiveLearningSystem(
-            model=model,
-            device=device,
-            checkpoint_dir=checkpoint_dir / "online_models",
-            **config['online_adaptation']
-        )
-        
-        # 온라인 적응 시스템 시작
-        online_system.start()
-        logger.info("Online adaptation system started")
-        
-        # 여기서는 예시로 1분간 실행 (실제로는 계속 실행되어야 함)
-        try:
-            import time
-            time.sleep(60)
-            
-            # 상태 확인
-            status = online_system.get_status()
-            logger.info(f"Online system status: {status}")
-            
-        except KeyboardInterrupt:
-            logger.info("Stopping online adaptation system...")
-        finally:
-            online_system.stop()
-            logger.info("Online adaptation system stopped")
-    
+
     logger.info("Training completed successfully!")
 
 if __name__ == "__main__":

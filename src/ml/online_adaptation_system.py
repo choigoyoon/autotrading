@@ -2,7 +2,7 @@ import torch
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional, Literal, cast
 import time
 import logging
 from datetime import datetime
@@ -84,7 +84,7 @@ class DataBuffer:
         with self.lock:
             return self.buffer.get(timeframe, []).copy()
     
-    def clear(self, timeframe: str = None):
+    def clear(self, timeframe: Optional[str] = None):
         """
         Clear data from the buffer
         
@@ -98,7 +98,7 @@ class DataBuffer:
             else:
                 self.buffer.clear()
     
-    def wait_for_data(self, timeout: float = None) -> bool:
+    def wait_for_data(self, timeout: Optional[float] = None) -> bool:
         """
         Wait for new data to be available
         
@@ -122,7 +122,7 @@ class OnlineAdaptationSystem:
         model_dir: str = 'models/adaptive',
         adaptation_interval: int = 3600,  # 1 hour in seconds
         max_adaptation_steps: int = 100,
-        device: str = None,
+        device: Optional[Literal['cuda', 'cpu']] = None,
         enable_adaptation: bool = True,
         enable_inference: bool = True,
         inference_interval: float = 60.0  # 60 seconds
@@ -142,7 +142,7 @@ class OnlineAdaptationSystem:
         self.model_dir = Path(model_dir)
         self.adaptation_interval = adaptation_interval
         self.max_adaptation_steps = max_adaptation_steps
-        self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device: Literal['cuda', 'cpu'] = device or ('cuda' if torch.cuda.is_available() else 'cpu')
         self.enable_adaptation = enable_adaptation
         self.enable_inference = enable_inference
         self.inference_interval = inference_interval
@@ -175,8 +175,8 @@ class OnlineAdaptationSystem:
         """Load pre-trained models"""
         try:
             self.adaptive_system = AdaptiveLearningSystem.load(
-                str(self.model_dir),
-                device=self.device
+                self.model_dir,
+                device=cast(Any, self.device)
             )
             logger.info("Successfully loaded pre-trained models")
         except Exception as e:
@@ -225,7 +225,7 @@ class OnlineAdaptationSystem:
         """
         self.market_data_buffer.add_data(timeframe, data)
     
-    def get_predictions(self, timeout: float = None) -> List[Dict[str, Any]]:
+    def get_predictions(self, timeout: Optional[float] = None) -> List[Dict[str, Any]]:
         """
         Get predictions from the inference queue
         
@@ -348,11 +348,11 @@ class OnlineAdaptationSystem:
         
         # Add regime information
         current_regime = self.regime_detector.detect_regime({
-            'open': df['open'].values,
-            'high': df['high'].values,
-            'low': df['low'].values,
-            'close': df['close'].values,
-            'volume': df['volume'].values
+            'open': df['open'].to_numpy(),
+            'high': df['high'].to_numpy(),
+            'low': df['low'].to_numpy(),
+            'close': df['close'].to_numpy(),
+            'volume': df['volume'].to_numpy()
         })
         
         # Store data for adaptation
@@ -503,12 +503,12 @@ class OnlineAdaptationSystem:
             }
             
             # Run inference
-            self.adaptive_system.ensemble.eval()
+            self.adaptive_system.ensemble.models[current_regime].eval()
             with torch.no_grad():
                 outputs = self.adaptive_system.ensemble.models[current_regime](x)
             
             # Process outputs
-            direction = torch.argmax(outputs['direction'], dim=-1).item()
+            direction = int(torch.argmax(outputs['direction'], dim=-1).item())
             direction_str = {0: 'LONG', 1: 'NEUTRAL', 2: 'SHORT'}.get(direction, 'UNKNOWN')
             
             # Create prediction dictionary

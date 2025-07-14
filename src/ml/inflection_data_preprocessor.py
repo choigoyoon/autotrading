@@ -2,7 +2,7 @@
 import pandas as pd
 import numpy as np
 from pathlib import Path
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Tuple, Optional, cast
 from scipy.signal import find_peaks
 
 class InflectionDataPreprocessor:
@@ -136,9 +136,10 @@ class InflectionDataPreprocessor:
 
         print("Generating features and labels for each inflection point...")
         for timestamp, row in inflection_points.iterrows():
-            context_seq = self._extract_context_sequence(timestamp)
-            moment_features = self._extract_moment_features(timestamp)
-            labels = self._calculate_labels(timestamp, row['inflection_price'])
+            ts = cast(pd.Timestamp, timestamp)
+            context_seq = self._extract_context_sequence(ts)
+            moment_features = self._extract_moment_features(ts)
+            labels = self._calculate_labels(ts, row['inflection_price'])
 
             if context_seq is not None and moment_features is not None and labels is not None:
                 all_contexts.append(context_seq)

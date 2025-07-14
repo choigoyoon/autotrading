@@ -3,15 +3,16 @@ import os
 from pathlib import Path
 from typing import Optional, Any, TYPE_CHECKING
 import pandas as pd
+import sys
 
-# utils.progress_logger는 src 폴더를 기준으로 찾을 수 있도록 경로 조정이 필요할 수 있음
-# 이 파일(logging_config.py)이 src/config/ 에 있으므로,
-# utils.progress_logger는 src/utils/progress_logger.py를 의미함.
-# sys.path에 src가 이미 추가되어 있다고 가정하고 진행.
+# 프로젝트 루트를 sys.path에 추가
+project_root = Path(__file__).resolve().parents[2]
+if str(project_root) not in sys.path:
+    sys.path.append(str(project_root))
 
 # 타입 체커(Linter)는 이 블록을 보고 ProgressLogger 타입을 인지함
 if TYPE_CHECKING:
-    from utils.progress_logger import ProgressLogger
+    from src.utils.progress_logger import ProgressLogger # type: ignore
 
 # 실제 런타임에 사용될 변수들 초기화
 RuntimeProgressLoggerClass: Optional[Any] = None # 실제 임포트될 클래스 또는 None
@@ -20,7 +21,7 @@ PROGRESS_LOGGER_MODULE_AVAILABLE = False
 
 try:
     # from utils.progress_logger import ProgressLogger as ImportedPLogger 로 하고, 타입힌트를 ImportedPLogger로 해도 됨
-    from utils.progress_logger import ProgressLogger as ActualImportedProgressLogger, EMOJI_CLOCK as ImportedEmojiClock
+    from src.utils.progress_logger import ProgressLogger as ActualImportedProgressLogger, EMOJI_CLOCK as ImportedEmojiClock # type: ignore
     RuntimeProgressLoggerClass = ActualImportedProgressLogger
     EMOJI_CLOCK = ImportedEmojiClock
     PROGRESS_LOGGER_MODULE_AVAILABLE = True

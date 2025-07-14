@@ -1,7 +1,14 @@
 import pandas as pd
-import talib
+import talib # type: ignore
 from typing import List
 import logging
+import sys
+from pathlib import Path
+
+# 프로젝트 루트를 sys.path에 추가
+project_root = Path(__file__).resolve().parents[2]
+if str(project_root) not in sys.path:
+    sys.path.append(str(project_root))
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -42,13 +49,6 @@ def add_indicators(df: pd.DataFrame, indicators: List[str] = ['rsi', 'macd']) ->
 
 if __name__ == '__main__':
     # 모듈 테스트 코드
-    from pathlib import Path
-    import sys
-
-    # 프로젝트 루트 경로 추가
-    project_root = Path(__file__).resolve().parent.parent.parent
-    sys.path.append(str(project_root))
-    
     from src.data.ohlcv_loader import load_ohlcv, resample_ohlcv
 
     data_file = project_root / 'data' / 'rwa' / 'parquet_converted' / 'btc_kst_1min.parquet'

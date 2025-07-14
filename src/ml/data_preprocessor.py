@@ -2,7 +2,7 @@
 import pandas as pd
 import numpy as np
 from pathlib import Path
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, cast
 
 class MultiTimeframeDataPreprocessor:
     """
@@ -46,8 +46,15 @@ class MultiTimeframeDataPreprocessor:
 
     def load_trade_logs(self) -> pd.DataFrame:
         """Holding 및 Breakeven 거래 로그를 로드하고 통합합니다."""
-        holding_path = Path(self.config.get("holding_trades_path"))
-        breakeven_path = Path(self.config.get("breakeven_trades_path"))
+        holding_path_str = self.config.get("holding_trades_path")
+        if not holding_path_str or not isinstance(holding_path_str, str):
+            raise ValueError("Config에 'holding_trades_path'가 올바르게 설정되지 않았습니다.")
+        holding_path = Path(holding_path_str)
+
+        breakeven_path_str = self.config.get("breakeven_trades_path")
+        if not breakeven_path_str or not isinstance(breakeven_path_str, str):
+            raise ValueError("Config에 'breakeven_trades_path'가 올바르게 설정되지 않았습니다.")
+        breakeven_path = Path(breakeven_path_str)
         
         holding_df = pd.read_csv(holding_path)
         breakeven_df = pd.read_csv(breakeven_path)
@@ -79,10 +86,10 @@ class MultiTimeframeDataPreprocessor:
             has_signal = 0.0
             
             if df is not None:
-                idx = df.index.searchsorted(timestamp, side='right') - 1
+                idx = cast(int, df.index.searchsorted(timestamp, side='right')) - 1
                 if idx >= 0:
                     latest_label = df.iloc[idx]
-                    time_diff = timestamp - latest_label.name
+                    time_diff = timestamp - cast(pd.Timestamp, latest_label.name)
                     
                     # 시간 단위를 pandas가 이해할 수 있는 형식으로 변환
                     try:
@@ -151,10 +158,10 @@ class MultiTimeframeDataPreprocessor:
             has_signal = 0.0
             
             if df is not None:
-                idx = df.index.searchsorted(timestamp, side='right') - 1
+                idx = cast(int, df.index.searchsorted(timestamp, side='right')) - 1
                 if idx >= 0:
                     latest_label = df.iloc[idx]
-                    time_diff = timestamp - latest_label.name
+                    time_diff = timestamp - cast(pd.Timestamp, latest_label.name)
                     
                     try:
                         # 'T' 대신 'min'을 사용하여 FutureWarning 방지

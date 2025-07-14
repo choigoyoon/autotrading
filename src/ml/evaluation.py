@@ -1,12 +1,12 @@
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, cast
 
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
-from sklearn.metrics import (accuracy_score, classification_report,
+from sklearn.metrics import (accuracy_score, classification_report, # type: ignore
                              confusion_matrix, f1_score, precision_score,
                              recall_score, roc_auc_score)
 
@@ -39,7 +39,8 @@ def evaluate_model(
     }
     
     # Classification Report
-    report: Dict[str, Any] = classification_report(y_test, y_pred, output_dict=True)
+    report_dict = classification_report(y_test, y_pred, output_dict=True)
+    report = cast(Dict[str, Any], report_dict)
     results['classification_report'] = report
     
     logger.info("--- 분류 리포트 ---")

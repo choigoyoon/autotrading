@@ -59,13 +59,12 @@ def train_model(
     # Dynamic import
     EarlyStopping = __import__('tensorflow.keras.callbacks', fromlist=['EarlyStopping']).EarlyStopping
     ModelCheckpoint = __import__('tensorflow.keras.callbacks', fromlist=['ModelCheckpoint']).ModelCheckpoint
-    Callback = __import__('tensorflow.keras.callbacks', fromlist=['Callback']).Callback
 
     model_dir = Path(config['training']['model_dir'])
     model_dir.mkdir(parents=True, exist_ok=True)
     model_path: Path = model_dir / 'best_model.keras'
     
-    callbacks: List[Callback] = [
+    callbacks: List[Any] = [
         EarlyStopping(monitor='val_loss', patience=config['training']['patience'], restore_best_weights=True),
         ModelCheckpoint(filepath=str(model_path), save_best_only=True, monitor='val_loss')
     ]

@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import math
 from pathlib import Path
+from typing import Tuple, Optional, cast
 
 class PositionalEncoding(nn.Module):
     """
@@ -21,46 +22,58 @@ class PositionalEncoding(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x: (seq_len, batch_size, d_model)
+            x (torch.Tensor): (seq_len, batch_size, d_model) 형태의 텐서.
         """
-        x = x + self.pe[:x.size(0)]
+        # PositionalEncoding은 (seq_len, batch_size, d_model) 입력을 가정하며,
+        # 입력 x에 위치 정보를 더하여 반환합니다.
+        pe = cast(torch.Tensor, self.pe)
+        x = x + pe[:x.size(0)]
         return self.dropout(x)
 
 class TradingTransformer(nn.Module):
     """
-    트레이딩 시그널 예측을 위한 Transformer 기반 모델.
-
-    입력: (batch_size, seq_len, input_dim)
-    출력:
-      - signal_out: (batch_size, num_classes) - 매수/매도/관망 분류
-      - return_out: (batch_size, 1) - 수익률 예측
-      - confidence_out: (batch_size, 1) - 예측 신뢰도
+    금융 시계열 데이터를 위한 트랜스포머 모델.
+    매수/매도/관망 신호, 예상 수익률, 신뢰도의 멀티태스크 예측을 수행합니다.
     """
     def __init__(self, input_dim: int = 50, d_model: int = 256, nhead: int = 8, 
                  num_encoder_layers: int = 6, dim_feedforward: int = 2048, 
                  num_classes: int = 3, dropout: float = 0.1):
         super().__init__()
         self.d_model = d_model
-        
+
         self.input_embedding = nn.Linear(input_dim, d_model)
         self.pos_encoder = PositionalEncoding(d_model, dropout)
         
-        encoder_layers = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, batch_first=True)
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layers, num_encoder_layers)
+        encoder_layer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, batch_first=True)
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_encoder_layers)
 
         # Multi-task heads
         self.signal_head = nn.Linear(d_model, num_classes)
         self.return_head = nn.Linear(d_model, 1)
         self.confidence_head = nn.Linear(d_model, 1)
 
-    def forward(self, src: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, src: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Args:
+            src (torch.Tensor): 입력 시계열 데이터. (batch_size, seq_len, input_dim)
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+                - signal_out (torch.Tensor): (batch_size, num_classes) - 매수/매도/관망 분류
+                - return_out (torch.Tensor): (batch_size, 1) - 수익률 예측
+                - confidence_out (torch.Tensor): (batch_size, 1) - 예측 신뢰도
+        """
         # src shape: (batch_size, seq_len, input_dim)
         
         # 1. Input embedding
         embedded_src = self.input_embedding(src) * math.sqrt(self.d_model)
         
         # 2. Positional encoding
-        pos_encoded_src = self.pos_encoder(embedded_src.permute(1, 0, 2)).permute(1, 0, 2)
+        # permute: (batch_size, seq_len, d_model) -> (seq_len, batch_size, d_model)
+        pos_encoded_src_permuted = self.pos_encoder(embedded_src.permute(1, 0, 2))
+        
+        # permute back: (seq_len, batch_size, d_model) -> (batch_size, seq_len, d_model)
+        pos_encoded_src = pos_encoded_src_permuted.permute(1, 0, 2)
         
         # 3. Transformer encoder
         # The output will be (batch_size, seq_len, d_model)
@@ -88,7 +101,10 @@ class MultiTaskLoss(nn.Module):
         self.cross_entropy_loss = nn.CrossEntropyLoss()
         self.mse_loss = nn.MSELoss()
 
-    def forward(self, predictions: tuple, targets: tuple) -> torch.Tensor:
+    def forward(self, 
+                predictions: Tuple[torch.Tensor, torch.Tensor, torch.Tensor], 
+                targets: Tuple[torch.Tensor, torch.Tensor]
+                ) -> torch.Tensor:
         signal_pred, return_pred, _ = predictions
         signal_target, return_target = targets
 
@@ -113,27 +129,26 @@ def model_summary(model: nn.Module):
     print(f"학습 가능한 파라미터: {trainable_params:,}")
     print("----------------")
 
-def save_model(model: nn.Module, path: str, epoch: int):
+def save_model(model: nn.Module, path: Path, epoch: int) -> None:
     """모델의 state_dict를 저장합니다."""
-    save_path = Path(path)
-    save_path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
     torch.save({
         'epoch': epoch,
         'model_state_dict': model.state_dict(),
-    }, save_path)
-    print(f"모델이 {save_path}에 저장되었습니다.")
+    }, path)
+    print(f"모델이 {path}에 저장되었습니다.")
 
-def load_model(model: nn.Module, path: str):
+def load_model(model: nn.Module, path: Path) -> Optional[int]:
     """저장된 state_dict를 모델에 로드합니다."""
-    load_path = Path(path)
-    if not load_path.exists():
-        print(f"경고: 모델 파일 {load_path}을(를) 찾을 수 없습니다.")
+    if not path.exists():
+        print(f"경고: 모델 파일 {path}을(를) 찾을 수 없습니다.")
         return None
     
-    checkpoint = torch.load(load_path)
+    checkpoint = torch.load(path)
     model.load_state_dict(checkpoint['model_state_dict'])
-    print(f"모델을 {load_path}에서 로드했습니다 (에포크: {checkpoint['epoch']}).")
-    return checkpoint['epoch']
+    epoch: int = checkpoint['epoch']
+    print(f"모델을 {path}에서 로드했습니다 (에포크: {epoch}).")
+    return epoch
 
 
 if __name__ == '__main__':
@@ -145,6 +160,7 @@ if __name__ == '__main__':
     num_classes_test = 3
 
     # --- 모델 생성 및 요약 ---
+    from src.ml.trading_transformer import TradingTransformer  # 또는 실제 TradingTransformer 정의 위치에 맞게 import 경로 수정
     model = TradingTransformer(
         input_dim=input_dim_test, 
         d_model=d_model_test, 
@@ -172,7 +188,7 @@ if __name__ == '__main__':
     print(f"\n계산된 멀티태스크 손실: {loss.item():.4f}")
 
     # --- 모델 저장/로드 테스트 ---
-    model_path = "models/test_transformer.pth"
+    model_path = Path("models/test_transformer.pth")
     save_model(model, model_path, epoch=10)
     
     new_model = TradingTransformer(

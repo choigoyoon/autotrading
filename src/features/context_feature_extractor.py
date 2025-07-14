@@ -1,7 +1,13 @@
 import pandas as pd
 from pathlib import Path
-import talib
+import talib # type: ignore
 import logging
+import sys
+
+# 프로젝트 루트를 sys.path에 추가
+project_root = Path(__file__).resolve().parents[2]
+if str(project_root) not in sys.path:
+    sys.path.append(str(project_root))
 
 class ContextFeatureExtractor:
     """Extracts contextual features for trading signals"""

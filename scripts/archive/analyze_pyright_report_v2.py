@@ -1,74 +1,127 @@
 import json
+import sys
 from collections import defaultdict
-from typing import Dict, List, Any
+from typing import TypedDict, cast
 
-# 리포트 파일 읽기 (예외 처리 추가)
-try:
-    with open('pyright_report_latest.json', 'r', encoding='utf-16') as f:
-        report_data = json.load(f)
-        if not isinstance(report_data, dict):
-             print("오류: JSON 최상위 타입이 딕셔너리가 아닙니다.")
-             report_data = {} # 빈 딕셔너리로 초기화
-except FileNotFoundError:
-    print("오류: 'pyright_report_latest.json' 파일을 찾을 수 없습니다. pyright를 먼저 실행하세요.")
-    report_data = {}
-except json.JSONDecodeError:
-    print("오류: 'pyright_report_latest.json' 파일 분석에 실패했습니다.")
-    report_data = {}
+if sys.version_info < (3, 11):
+    from typing_extensions import NotRequired
+else:
+    from typing import NotRequired  # type: ignore[unreachable]
 
-# 오류 타입별 분석
-error_types: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-diagnostics = report_data.get('generalDiagnostics', [])
 
-if isinstance(diagnostics, list):
+# --- TypedDict Definitions ---
+class Start(TypedDict):
+    line: int
+    character: int
+
+
+class Range(TypedDict):
+    start: Start
+    end: Start
+
+
+class Diagnostic(TypedDict):
+    file: str
+    message: str
+    severity: str
+    range: NotRequired[Range]
+    rule: NotRequired[str]
+
+
+class Summary(TypedDict):
+    errorCount: int
+    warningCount: int
+    informationCount: int
+    hintCount: int
+
+
+class PyrightReport(TypedDict):
+    version: str
+    time: str
+    generalDiagnostics: list[Diagnostic]
+    summary: Summary
+
+
+class ErrorDetails(TypedDict):
+    file: str
+    line: int
+    message: str
+
+
+def read_report(file_path: str) -> PyrightReport | None:
+    """Reads and parses the Pyright JSON report file."""
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            # The loaded data is cast to the specific TypedDict.
+            return cast(PyrightReport, json.load(f))
+    except FileNotFoundError:
+        print(f"Error: Report file not found at '{file_path}'.")
+    except json.JSONDecodeError:
+        print(f"Error: Failed to parse JSON from '{file_path}'.")
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
+    return None
+
+
+def analyze_diagnostics(diagnostics: list[Diagnostic]) -> None:
+    """Analyzes and prints diagnostics by priority."""
+    error_types: defaultdict[str, list[ErrorDetails]] = defaultdict(list)
+
     for diagnostic in diagnostics:
-        if not isinstance(diagnostic, dict):
-            continue
+        rule = diagnostic.get("rule", "unknown")
+        line_num = diagnostic.get("range", {}).get("start", {}).get("line", -1)
 
-        rule = diagnostic.get('rule', 'unknown')
-        file_path = diagnostic.get('file', 'unknown_file')
-        
-        # range 및 start가 딕셔너리인지 확인
-        range_info = diagnostic.get('range', {})
-        start_info = range_info.get('start', {}) if isinstance(range_info, dict) else {}
-        line_num = start_info.get('line', -1) if isinstance(start_info, dict) else -1
+        details = ErrorDetails(
+            file=diagnostic.get("file", "unknown_file"),
+            line=line_num,
+            message=diagnostic.get("message", "No message"),
+        )
+        error_types[rule].append(details)
 
-        error_types[rule].append({
-            'file': file_path,
-            'line': line_num,
-            'message': diagnostic.get('message', 'No message')
-        })
+    priority_rules = [
+        "reportOperatorIssue", "reportOptionalOperand", "reportArgumentType",
+        "reportGeneralTypeIssues", "reportUnusedCallResult", "reportUnusedImport",
+        "reportUnknownMemberType", "reportUnknownVariableType", "reportAny"
+    ]
 
-# 우선순위 룰
-priority_rules = [
-    'reportOperatorIssue', 'reportOptionalOperand', 'reportArgumentType',
-    'reportGeneralTypeIssues', 'reportUnusedCallResult', 'reportUnusedImport'
-]
+    print("=== Priority Error Analysis ===")
+    total_errors = len(diagnostics)
 
-print("=== 우선순위별 오류 분석 ===")
-total_errors = len(diagnostics) if isinstance(diagnostics, list) else 0
+    for rule in priority_rules:
+        if rule_errors := error_types.get(rule):
+            count = len(rule_errors)
+            print(f"\n🔴 {rule}: {count} errors")
 
-for rule in priority_rules:
-    count = len(error_types[rule])
-    if count > 0:
-        print(f"\n🔴 {rule}: {count}개")
-        
-        files = defaultdict(int)
-        for error in error_types.get(rule, []):
-             if isinstance(error, dict):
-                files[error.get('file', 'unknown_file')] += 1
-        
-        print("   파일별 분포:")
-        for file, cnt in sorted(files.items(), key=lambda x: x[1], reverse=True)[:5]:
-            print(f"   - {file}: {cnt}개")
-            
-        print("   예시:")
-        for error in error_types.get(rule, [])[:3]:
-            if isinstance(error, dict):
-                line = error.get('line', -1)
-                display_line = line + 1 if isinstance(line, int) and line != -1 else 'N/A'
-                message = error.get('message', 'No message')
-                file = error.get('file', 'N/A')
-                print(f"   - {file}:{display_line} - {str(message)[:60]}...")
+            files: defaultdict[str, int] = defaultdict(int)
+            for error in rule_errors:
+                files[error["file"]] += 1
 
-print(f"\n총 오류 수: {total_errors}") 
+            print("   File Distribution:")
+            for file, cnt in sorted(files.items(), key=lambda x: x[1], reverse=True)[:5]:
+                print(f"   - {file}: {cnt}")
+
+            print("   Examples:")
+            for error in rule_errors[:3]:
+                line_display = "N/A" if error["line"] == -1 else error["line"] + 1
+                message_preview = error['message'][:70]
+                print(f"   - {error['file']}:{line_display} - {message_preview}...")
+
+    print(f"\nTotal Errors Found: {total_errors}")
+
+
+def main() -> None:
+    """Main execution function."""
+    if len(sys.argv) > 1:
+        report_path = sys.argv[1]
+    else:
+        report_path = "pyright_report_latest.json"
+
+    if report_data := read_report(report_path):
+        if diagnostics := report_data.get("generalDiagnostics"):
+            analyze_diagnostics(diagnostics)
+        else:
+            print("No diagnostics to analyze.")
+
+
+if __name__ == "__main__":
+    main() 

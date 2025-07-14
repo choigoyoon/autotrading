@@ -1,186 +1,162 @@
-import pandas as pd
-import glob
-import os
+import sys
 from pathlib import Path
+from typing import Literal, Union, Optional
 
-def convert_timezone(df: pd.DataFrame, timestamp_col: str = 'timestamp', source_tz: str = 'UTC', target_tz: str = 'Asia/Seoul') -> pd.DataFrame:
+import pandas as pd
+from loguru import logger
+
+SourceTimezone = Union[Literal["UTC"], Literal["Asia/Seoul"]]
+TargetTimezone = Union[Literal["UTC"], Literal["Asia/Seoul"]]
+
+class TimezoneConverter:
     """
-    DataFrame의 타임스탬프 열 시간대를 변환합니다.
-
-    Args:
-        df (pd.DataFrame): 변환할 데이터프레임.
-        timestamp_col (str): 타임스탬프 열 이름.
-        source_tz (str): 원본 시간대 (예: 'UTC', 'Asia/Seoul').
-        target_tz (str): 대상 시간대 (예: 'Asia/Seoul', 'UTC').
-
-    Returns:
-        pd.DataFrame: 시간대가 변환된 데이터프레임.
+    Pandas DataFrame의 타임스탬프 시간대를 변환하는 클래스.
+    모든 타임스탬프는 변환 후에도 타임존 정보를 유지(aware)합니다.
     """
-    df = df.copy()
-    
-    # 타임스탬프 열이 datetime 타입이 아니면 변환
-    if not pd.api.types.is_datetime64_any_dtype(df[timestamp_col]):
-        df[timestamp_col] = pd.to_datetime(df[timestamp_col])
-    
-    # 원본 시간대 설정 (타임존 정보가 없는 경우)
-    if df[timestamp_col].dt.tz is None:
-        df[timestamp_col] = df[timestamp_col].dt.tz_localize(source_tz)
-    
-    # 대상 시간대로 변환
-    df[timestamp_col] = df[timestamp_col].dt.tz_convert(target_tz)
-    
-    # 시간대 정보를 제거하고 naive datetime으로 만듦
-    df[timestamp_col] = df[timestamp_col].dt.tz_localize(None)
-    
-    return df
+    def __init__(self, timestamp_col: str = "timestamp"):
+        self.timestamp_col = timestamp_col
 
-def utc_to_kst(df: pd.DataFrame, timestamp_col: str = 'timestamp') -> pd.DataFrame:
-    """UTC 시간을 KST로 변환하고 시간대 컬럼을 'kst'로 업데이트/생성합니다."""
-    df_converted = convert_timezone(df, timestamp_col, 'UTC', 'Asia/Seoul')
-    
-    # 기존 시간대 컬럼(utc, timezone)을 찾아 'kst'로 변경
-    for col in ['utc', 'timezone']:
-        if col in df_converted.columns:
-            df_converted = df_converted.rename(columns={col: 'kst'})
-            break
-            
-    df_converted['kst'] = 'KST'
-    return df_converted
+    def convert_timezone(
+        self,
+        df: pd.DataFrame,
+        source_tz: SourceTimezone,
+        target_tz: TargetTimezone,
+    ) -> pd.DataFrame:
+        """
+        DataFrame의 타임스탬프 열 시간대를 변환합니다.
 
-def kst_to_utc(df: pd.DataFrame, timestamp_col: str = 'timestamp') -> pd.DataFrame:
-    """KST 시간을 UTC로 변환하고 시간대 컬럼을 'utc'로 업데이트/생성합니다."""
-    df_converted = convert_timezone(df, timestamp_col, 'Asia/Seoul', 'UTC')
-    
-    # 기존 시간대 컬럼(kst, timezone)을 찾아 'utc'로 변경
-    for col in ['kst', 'timezone']:
-        if col in df_converted.columns:
-            df_converted = df_converted.rename(columns={col: 'utc'})
-            break
+        Args:
+            df (pd.DataFrame): 변환할 데이터프레임.
+            source_tz (SourceTimezone): 원본 시간대.
+            target_tz (TargetTimezone): 대상 시간대.
 
-    df_converted['utc'] = 'UTC'
-    return df_converted
+        Returns:
+            pd.DataFrame: 시간대가 변환된 데이터프레임 (aware).
+        """
+        if not isinstance(df, pd.DataFrame):
+            raise TypeError("입력 데이터는 반드시 pandas DataFrame이어야 합니다.")
+        
+        df = df.copy()
 
-def auto_convert_timezone(df: pd.DataFrame, timestamp_col: str = 'timestamp') -> pd.DataFrame:
-    """
-    데이터프레임의 시간대를 자동으로 감지하여 반대 시간대로 변환합니다.
-    'utc', 'kst', 'timezone' 컬럼을 기준으로 변환 방향을 결정하고 컬럼명을 교체합니다.
+        if self.timestamp_col not in df.columns:
+            raise KeyError(f"타임스탬프 열 '{self.timestamp_col}'을 찾을 수 없습니다.")
 
-    Args:
-        df (pd.DataFrame): 변환할 데이터프레임.
-        timestamp_col (str): 타임스탬프 열 이름.
+        if not pd.api.types.is_datetime64_any_dtype(df[self.timestamp_col]):
+            df[self.timestamp_col] = pd.to_datetime(df[self.timestamp_col], errors='coerce')
+        
+        # NaT 값이 있으면 변환 실패로 간주
+        if df[self.timestamp_col].isnull().any():
+            raise ValueError("타임스탬프 변환 중 유효하지 않은 값이 포함되어 있습니다.")
 
-    Returns:
-        pd.DataFrame: 시간대가 변환된 데이터프레임.
-    """
-    df = df.copy()
-    
-    # 컬럼 이름 또는 값으로 UTC/KST 감지
-    is_utc = 'utc' in df.columns or ('timezone' in df.columns and not df['timezone'].empty and str(df['timezone'].iloc[0]).upper() == 'UTC')
-    is_kst = 'kst' in df.columns or ('timezone' in df.columns and not df['timezone'].empty and str(df['timezone'].iloc[0]).upper() == 'KST')
+        # 원본 시간대 설정 (타임존 정보가 없는 경우, naive -> aware)
+        if df[self.timestamp_col].dt.tz is None:
+            df[self.timestamp_col] = df[self.timestamp_col].dt.tz_localize(source_tz)
+        else: # 이미 aware 상태이면, 원본 시간대와 일치하는지 확인
+            if str(df[self.timestamp_col].dt.tz) != source_tz:
+                logger.warning(
+                    f"입력 데이터의 시간대({df[self.timestamp_col].dt.tz})가 "
+                    f"명시된 원본 시간대({source_tz})와 다릅니다. "
+                    f"대상 시간대({target_tz})로 강제 변환합니다."
+                )
 
-    if is_utc:
-        print("🕐 감지된 시간대: UTC. KST로 변환합니다.")
-        df_converted = utc_to_kst(df, timestamp_col)
-    elif is_kst:
-        print("🕐 감지된 시간대: KST. UTC로 변환합니다.")
-        df_converted = kst_to_utc(df, timestamp_col)
-    else:
-        # 기본 동작: 시간대 정보가 불명확하면 KST로 간주하고 UTC로 변환
-        print("🕐 시간대를 명확히 감지할 수 없습니다. KST로 가정하고 UTC로 변환합니다.")
-        df_converted = kst_to_utc(df, timestamp_col)
-            
-    return df_converted
+        # 대상 시간대로 변환
+        return df[self.timestamp_col].dt.tz_convert(target_tz).to_frame()
+
+
+    def to_kst(self, df: pd.DataFrame) -> pd.DataFrame:
+        """UTC 또는 naive 시간을 KST로 변환합니다."""
+        return self.convert_timezone(df, source_tz="UTC", target_tz="Asia/Seoul")
+
+    def to_utc(self, df: pd.DataFrame) -> pd.DataFrame:
+        """KST 또는 naive 시간을 UTC로 변환합니다."""
+        return self.convert_timezone(df, source_tz="Asia/Seoul", target_tz="UTC")
+
+
+def get_project_root() -> Path:
+    """프로젝트 루트 디렉토리를 반환합니다."""
+    return Path(__file__).resolve().parent.parent.parent
 
 def batch_convert_timezone(
-    input_dir: str,
-    output_dir: str,
-    timestamp_col: str = 'timestamp'
-):
+    input_dir: Path,
+    output_dir: Path,
+    target_tz: TargetTimezone,
+    timestamp_col: str = "timestamp",
+    source_tz: Optional[SourceTimezone] = None,
+) -> None:
     """
     특정 디렉토리의 모든 CSV/Parquet 파일의 시간대를 일괄 변환합니다.
-    파일 내용을 기반으로 변환 방향을 자동 감지하고,
-    파일 이름에 '_utc_' 또는 '_kst_'를 포함하여 저장합니다.
 
     Args:
-        input_dir (str): 입력 파일이 있는 디렉토리 경로.
-        output_dir (str): 변환된 파일을 저장할 디렉토리 경로.
+        input_dir (Path): 입력 파일 디렉토리.
+        output_dir (Path): 출력 파일 디렉토리.
+        target_tz (TargetTimezone): 변환할 목표 시간대.
         timestamp_col (str): 타임스탬프 열 이름.
+        source_tz (Optional[SourceTimezone]): 원본 시간대. None이면 naive로 간주.
     """
-    # 출력 디렉토리가 없으면 생성
-    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    converter = TimezoneConverter(timestamp_col)
     
-    # CSV와 Parquet 파일 모두 처리
-    files = glob.glob(os.path.join(input_dir, '*.csv')) + glob.glob(os.path.join(input_dir, '*.parquet'))
+    files_to_process = list(input_dir.glob("*.csv")) + list(input_dir.glob("*.parquet"))
 
-    if not files:
-        print(f"⚠️ {input_dir} 에서 처리할 파일을 찾지 못했습니다.")
+    if not files_to_process:
+        logger.warning(f"'{input_dir}'에서 처리할 파일을 찾지 못했습니다.")
         return
 
-    for file_path in files:
+    for file_path in files_to_process:
         try:
-            print(f"🔄 처리 중: {file_path}")
+            logger.info(f"🔄 처리 중: {file_path.name}")
             
-            # 파일 확장자에 따라 읽기
-            df = pd.read_csv(file_path) if file_path.endswith('.csv') else pd.read_parquet(file_path)
-            
-            # --- 목표 파일명 생성 및 존재 여부 확인 ---
-            is_utc = 'utc' in df.columns or ('timezone' in df.columns and not df['timezone'].empty and str(df['timezone'].iloc[0]).upper() == 'UTC')
-            tz_tag = 'kst' if is_utc else 'utc'
+            df = pd.read_csv(file_path) if file_path.suffix == ".csv" else pd.read_parquet(file_path)
 
-            base_name, ext = os.path.splitext(os.path.basename(file_path))
-            parts = base_name.split('_')
-            clean_parts = [p for p in parts if p.lower() not in ['utc', 'kst']]
-            
-            if len(clean_parts) > 0:
-                clean_parts.insert(1, tz_tag)
-            else:
-                clean_parts.append(tz_tag)
+            # 결정된 소스 타임존. source_tz가 명시되지 않으면 KST를 기본값으로 사용
+            determined_source_tz: SourceTimezone = source_tz or ("Asia/Seoul" if target_tz == "UTC" else "UTC")
 
-            new_base_name = '_'.join(clean_parts)
-            new_file_name = f"{new_base_name}{ext}"
-            new_path = os.path.join(output_dir, new_file_name)
-            
-            # 파일이 이미 존재하면 건너뛰기
-            if os.path.exists(new_path):
-                print(f"⏩ 건너뛰기: {new_path} 파일이 이미 존재합니다.")
+            df_converted = converter.convert_timezone(df, determined_source_tz, target_tz)
+
+            # 새 파일명 생성 (예: btc_data_kst.csv)
+            new_file_name = f"{file_path.stem}_{target_tz.replace('/', '_').lower()}{file_path.suffix}"
+            output_path = output_dir / new_file_name
+
+            if output_path.exists():
+                logger.info(f"⏩ 건너뛰기: '{output_path.name}' 파일이 이미 존재합니다.")
                 continue
-            
-            # --- 시간대 변환 및 저장 ---
-            if is_utc:
-                print(f"  -> UTC 감지. KST로 변환합니다.")
-                df_converted = utc_to_kst(df, timestamp_col)
-            else: # KST 또는 미지정이면 UTC로 변환
-                print(f"  -> KST (또는 미지정) 감지. UTC로 변환합니다.")
-                df_converted = kst_to_utc(df, timestamp_col)
 
-            # 새 파일명으로 저장
-            if file_path.endswith('.csv'):
-                df_converted.to_csv(new_path, index=False)
-            elif file_path.endswith('.parquet'):
-                df_converted.to_parquet(new_path, index=False)
+            if file_path.suffix == ".csv":
+                df_converted.to_csv(output_path, index=False)
+            else:
+                df_converted.to_parquet(output_path, index=False)
             
-            print(f"✅ 완료: {new_path}")
+            logger.success(f"✅ 완료: '{output_path.name}'")
+
+        except (KeyError, TypeError, ValueError) as e:
+            logger.error(f"🚨 오류 발생 ({file_path.name}): {e}")
         except Exception as e:
-            print(f"🚨 오류 발생 ({file_path}): {e}")
+            logger.error(f"🚨 예기치 않은 오류 발생 ({file_path.name}): {e}")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
+    logger.remove()
+    logger.add(sys.stderr, level="INFO")
+    
+    project_root = get_project_root()
+    
     # --- 사용 예시 ---
-    # 이 스크립트를 직접 실행하면 아래 로직이 동작합니다.
-    # 파일 내용을 자동 감지하여 시간대를 변환하고, 파일명에 '_kst_' 또는 '_utc_'를 추가하여 저장합니다.
-    
-    # 1. CSV 파일 변환 (data/rwa/csv -> data/rwa/csv_converted)
-    print("\n--- CSV 파일 시간대 자동 변환 시작 ---")
+    # 1. KST Parquet 파일을 UTC로 변환
+    logger.info("\n--- KST -> UTC Parquet 파일 변환 시작 ---")
     batch_convert_timezone(
-        input_dir='data/rwa/csv',
-        output_dir='data/rwa/csv_converted'
-    )
-    
-    # 2. Parquet 파일 변환 (data/rwa/parquet -> data/rwa/parquet_converted)
-    print("\n--- Parquet 파일 시간대 자동 변환 시작 ---")
-    batch_convert_timezone(
-        input_dir='data/rwa/parquet',
-        output_dir='data/rwa/parquet_converted'
+        input_dir=project_root / "data/rwa/parquet_kst",
+        output_dir=project_root / "data/rwa/parquet_utc",
+        target_tz="UTC",
+        source_tz="Asia/Seoul"
     )
 
-    print("\n🎉 모든 작업이 완료되었습니다.") 
+    # 2. UTC CSV 파일을 KST로 변환
+    logger.info("\n--- UTC -> KST CSV 파일 변환 시작 ---")
+    batch_convert_timezone(
+        input_dir=project_root / "data/rwa/csv_utc",
+        output_dir=project_root / "data/rwa/csv_kst",
+        target_tz="Asia/Seoul",
+        source_tz="UTC"
+    )
+
+    logger.info("\n🎉 모든 작업이 완료되었습니다.") 

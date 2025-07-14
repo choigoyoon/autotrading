@@ -1,55 +1,73 @@
 import json
+import sys
 from collections import Counter, defaultdict
+from typing import TypedDict, cast
 
-def analyze_report_by_file(file_path='pyright_report.json'):
+if sys.version_info < (3, 11):
+    from typing_extensions import NotRequired
+else:
+    from typing import NotRequired  # type: ignore[unreachable]
+
+
+class Diagnostic(TypedDict):
+    file: str
+    message: str
+    severity: str
+    rule: NotRequired[str]
+
+
+class Summary(TypedDict):
+    errorCount: int
+    warningCount: int
+    informationCount: int
+    hintCount: int
+
+
+class PyrightReport(TypedDict):
+    version: str
+    time: str
+    generalDiagnostics: list[Diagnostic]
+    summary: Summary
+
+
+def analyze_report_by_file(file_path: str) -> None:
     """
-    pyright_report.json 파일을 읽어, 오류 유형별로 어떤 파일에서
-    가장 많이 발생하는지 분석하여 출력합니다.
+    Analyzes a Pyright report to find which files have the most errors for each rule.
     """
-    encodings_to_try = ['utf-8', 'utf-16', 'latin-1', 'cp949']
-    data = None
-
-    for encoding in encodings_to_try:
-        try:
-            with open(file_path, 'r', encoding=encoding) as f:
-                data = json.load(f)
-            # print(f"Successfully loaded file with '{encoding}' encoding.")
-            break
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            continue
-
-    if not data:
-        print("Could not read or parse the report file.")
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            data: PyrightReport = cast(PyrightReport, json.load(f))
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        print(f"Error reading or parsing the report file: {e}")
         return
 
-    diagnostics = data.get('generalDiagnostics', [])
+    diagnostics = data.get("generalDiagnostics", [])
+
     if not diagnostics:
         print("No diagnostics found in the report.")
         return
 
-    # 오류 규칙별 파일 빈도수 계산
-    errors_by_rule = defaultdict(lambda: Counter())
+    errors_by_rule: defaultdict[str, Counter[str]] = defaultdict(Counter)
     for d in diagnostics:
-        rule = d.get('rule')
-        file = d.get('file')
-        if rule and file:
-            errors_by_rule[rule].update([file])
+        rule = d.get("rule", "unknown")
+        file = d.get("file", "unknown_file")
+        errors_by_rule[rule].update([file])
 
     if not errors_by_rule:
         print("No errors with rules found.")
         return
 
-    # 가장 흔한 오류 유형 2개에 대해 상위 3개 파일 출력
-    top_rules = [rule for rule, _ in Counter({r: sum(c.values()) for r, c in errors_by_rule.items()}).most_common(2)]
+    rule_counts = {rule: sum(counts.values()) for rule, counts in errors_by_rule.items()}
+    top_rules = [
+        rule for rule, _ in Counter(rule_counts).most_common(2)
+    ]
 
     for rule in top_rules:
         print(f"\n--- Top 3 files for rule '{rule}' ---")
         for file, count in errors_by_rule[rule].most_common(3):
             print(f"  {file}: {count}")
 
-if __name__ == '__main__':
-    import sys
-    if len(sys.argv) > 1:
-        analyze_report_by_file(sys.argv[1])
-    else:
-        analyze_report_by_file() 
+
+if __name__ == "__main__":
+    REPORT_PATH = "pyright_report.json"
+    analyze_report_by_file(REPORT_PATH) 

@@ -4,7 +4,7 @@
 # Note: All timestamps in CSV files are stored as timezone-naive datetime strings,
 #       but they represent UTC time. Parquet files store timezone-aware UTC timestamps.
 
-import ccxt
+import ccxt  # type: ignore[reportMissingTypeStubs]
 import pandas as pd
 import argparse
 import os
@@ -13,6 +13,7 @@ import time
 import sys
 import shutil
 from datetime import datetime
+from typing import List, Any, Union, cast
 
 def collect_all_ohlcv(symbol: str, timeframe: str, since_timestamp: int) -> pd.DataFrame:
     """
@@ -35,7 +36,9 @@ def collect_all_ohlcv(symbol: str, timeframe: str, since_timestamp: int) -> pd.D
     
     while True:
         try:
-            ohlcv = binance.fetch_ohlcv(symbol, timeframe, since=since_timestamp, limit=limit)
+            ohlcv_data = binance.fetch_ohlcv(symbol, timeframe, since=since_timestamp, limit=limit)
+            ohlcv = cast(List[List[Any]], ohlcv_data)
+            
             if not ohlcv:
                 print("더 이상 가져올 데이터가 없어 수집을 종료합니다.")
                 break
@@ -45,7 +48,7 @@ def collect_all_ohlcv(symbol: str, timeframe: str, since_timestamp: int) -> pd.D
             print(f"  - 수집된 캔들: {len(ohlcv)}개 (from: {first_ts}, to: {last_ts})")
 
             all_data.extend(ohlcv)
-            since_timestamp = ohlcv[-1][0] + 1  # 다음 요청 시점 설정
+            since_timestamp = int(ohlcv[-1][0]) + 1  # 다음 요청 시점 설정
 
             if len(ohlcv) < limit:
                 print("가장 최신 데이터까지 수집 완료했습니다.")
@@ -131,10 +134,12 @@ def safe_update_csv(csv_path: Path, symbol: str, timeframe: str):
     # CSV를 읽을 때 timestamp 컬럼을 datetime 객체로 바로 파싱 (naive datetime이 됨)
     existing_data = pd.read_csv(csv_path, parse_dates=['timestamp'])
     
+    last_timestamp: int
     if existing_data.empty:
         # 바이낸스 BTC/USDT 현물 거래 시작 시점 (UTC)
         since_timestamp = int(pd.to_datetime('2017-08-17 04:00:00').timestamp() * 1000)
         print("기존 데이터가 비어있습니다. 2017-08-17 04:00:00 (UTC) 부터 데이터 수집을 시작합니다.")
+        last_timestamp = since_timestamp
     else:
         # 마지막 naive datetime 객체를 가져옴
         last_dt_naive = existing_data['timestamp'].iloc[-1]

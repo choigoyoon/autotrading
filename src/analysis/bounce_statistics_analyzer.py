@@ -3,6 +3,8 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 import warnings
+from typing import Optional, Dict, cast, Any, List, Tuple
+from tqdm import tqdm
 
 # 경고 메시지 무시
 warnings.filterwarnings('ignore', category=FutureWarning)
@@ -25,10 +27,10 @@ class BounceStatisticsAnalyzer:
         self.base_path = base_path
         self.results_path = self.base_path / "results"
         self.data_path = self.base_path / "data"
-        self.performance_df = None
-        self.graded_df = None
-        self.top_100_indices = None
-        self.stats = {}
+        self.performance_df: Optional[pd.DataFrame] = None
+        self.graded_df: Optional[pd.DataFrame] = None
+        self.top_100_indices: pd.Index = pd.Index([])
+        self.stats: Dict[str, pd.DataFrame] = {}
         print("BounceStatisticsAnalyzer가 초기화되었습니다.")
 
     def _load_data(self):
@@ -45,18 +47,29 @@ class BounceStatisticsAnalyzer:
         # CSV 파일을 읽을 때 첫 번째 컬럼(인덱스)을 timestamp로 지정
         self.performance_df = pd.read_csv(perf_file, index_col=0, parse_dates=True)
         merged_labels = pd.read_parquet(merged_labels_file)
+
+        if not isinstance(self.performance_df, pd.DataFrame):
+             raise TypeError("performance_df가 DataFrame이 아닙니다.")
         
-        # 타임프레임 합의(동일 시간 라벨 개수) 계산
-        agreement_counts = merged_labels.groupby(merged_labels.index).size().rename('agreement_count')
+        # 'signal_id'로 그룹화된 결과에 'agreement_count' 컬럼 생성
+        agreement_counts: pd.Series = cast(pd.Series, merged_labels.groupby('signal_id')['label_type'].count())
+        agreement_counts.name = "agreement_count"
+        
+        # 원본 DataFrame에 병합
+        merged_labels = merged_labels.merge(agreement_counts, on='signal_id', how='left')
+
+        # 합의 점수 계산 (전체 라벨 수 대비 일치하는 라벨 수)
+        merged_labels['agreement_score'] = merged_labels.groupby(by='signal_id')['agreement_score'].transform('mean')
         
         # 인덱스를 기준으로 합의 개수를 성능 데이터프레임에 병합
         self.performance_df = self.performance_df.join(agreement_counts, how='left')
-        self.performance_df['agreement_count'].fillna(1, inplace=True) # 병합 안된 경우 1로 처리
-        
-        # 'timestamp' 컬럼이 필요하다면 인덱스를 리셋하여 생성
-        self.performance_df.reset_index(inplace=True)
-        # 인덱스 이름이 'index' 또는 'Unnamed: 0'일 수 있으므로 'timestamp'로 명확히 변경
-        self.performance_df.rename(columns={'index': 'timestamp', 'Unnamed: 0': 'timestamp'}, inplace=True)
+        if self.performance_df is not None:
+            self.performance_df['agreement_count'].fillna(1, inplace=True) # 병합 안된 경우 1로 처리
+            
+            # 'timestamp' 컬럼이 필요하다면 인덱스를 리셋하여 생성
+            self.performance_df.reset_index(inplace=True)
+            # 인덱스 이름이 'index' 또는 'Unnamed: 0'일 수 있으므로 'timestamp'로 명확히 변경
+            self.performance_df = self.performance_df.rename(columns={'index': 'timestamp', 'Unnamed: 0': 'timestamp'})
         print("데이터 로딩 및 전처리 완료.")
 
     def _grade_labels(self):
@@ -68,17 +81,19 @@ class BounceStatisticsAnalyzer:
         df = self.performance_df.copy()
         
         # 합의 개수에 따라 A/B 등급 부여
-        conditions = [
+        conditions: List[bool | pd.Series] = [
             (df['agreement_count'] >= 5),
             (df['agreement_count'].between(3, 4))
         ]
-        choices = ['A_Grade', 'B_Grade']
+        choices: List[str] = ['A_Grade', 'B_Grade']
         df['grade'] = np.select(conditions, choices, default='C_Grade')
 
         # 수익률 기준 Top 100 라벨 인덱스 식별 (매수/매도 별도)
-        top_100_buy_indices = df[df['label_type'] == 1].nlargest(100, 'max_profit_pct').index
-        top_100_sell_indices = df[df['label_type'] == -1].nlargest(100, 'max_profit_pct').index
-        self.top_100_indices = top_100_buy_indices.union(top_100_sell_indices)
+        df_buys: pd.DataFrame = cast(pd.DataFrame, df[df['label_type'] == 1])
+        df_sells: pd.DataFrame = cast(pd.DataFrame, df[df['label_type'] == -1])
+        top_100_buy_indices: pd.Index = df_buys.nlargest(100, columns='max_profit_pct').index
+        top_100_sell_indices: pd.Index = df_sells.nlargest(100, columns='max_profit_pct').index
+        self.top_100_indices = cast(pd.Index, top_100_buy_indices.union(top_100_sell_indices))
 
         self.graded_df = df
         print("라벨 등급 분류 완료.")
@@ -92,16 +107,29 @@ class BounceStatisticsAnalyzer:
                 'avg_duration_tomax_min', 'p25_bounce_pct', 'p50_bounce_pct', 'p75_bounce_pct', 'p90_bounce_pct'
             ], dtype=float)
 
+        profit_series: pd.Series = cast(pd.Series, data['max_profit_pct'])
+        
+        avg_duration_minutes = 0.0
+        if 'time_to_max_profit' in data.columns:
+            # Timedelta로 변환 시도
+            durations = pd.to_timedelta(cast(pd.Series, data['time_to_max_profit']), errors='coerce')
+            # NaT가 아닌 유효한 값들만 평균 계산
+            valid_durations = durations.dropna()
+            if not valid_durations.empty:
+                mean_duration = valid_durations.mean()
+                if isinstance(mean_duration, pd.Timedelta):
+                    avg_duration_minutes = mean_duration.total_seconds() / 60
+
         stats = {
             'count': len(data),
-            'avg_bounce_pct': data['max_profit_pct'].mean() * 100,
-            'max_bounce_pct': data['max_profit_pct'].max() * 100,
-            'success_rate_5pct': (data['max_profit_pct'] > 0.05).mean() * 100,
-            'avg_duration_tomax_min': data['time_to_max_profit'].mean(),
-            'p25_bounce_pct': data['max_profit_pct'].quantile(0.25) * 100,
-            'p50_bounce_pct': data['max_profit_pct'].quantile(0.50) * 100,
-            'p75_bounce_pct': data['max_profit_pct'].quantile(0.75) * 100,
-            'p90_bounce_pct': data['max_profit_pct'].quantile(0.90) * 100,
+            'avg_bounce_pct': profit_series.mean() * 100,
+            'max_bounce_pct': profit_series.max() * 100,
+            'success_rate_5pct': (profit_series > 0.05).mean() * 100,
+            'avg_duration_tomax_min': avg_duration_minutes,
+            'p25_bounce_pct': profit_series.quantile(0.25) * 100,
+            'p50_bounce_pct': profit_series.quantile(0.50) * 100,
+            'p75_bounce_pct': profit_series.quantile(0.75) * 100,
+            'p90_bounce_pct': profit_series.quantile(0.90) * 100,
         }
         return pd.Series(stats)
 
@@ -150,13 +178,13 @@ class BounceStatisticsAnalyzer:
         # A급/B급 통계
         for grade in ['A_Grade', 'B_Grade']:
             grade_df = self.graded_df[self.graded_df['grade'] == grade]
-            buy_stats = self._calculate_stats(grade_df, 1)
-            sell_stats = self._calculate_stats(grade_df, -1)
+            buy_stats = self._calculate_stats(cast(pd.DataFrame, grade_df), 1)
+            sell_stats = self._calculate_stats(cast(pd.DataFrame, grade_df), -1)
             stats_df = pd.DataFrame({'Buy_Label (L)': buy_stats, 'Sell_Label (H)': sell_stats})
             self.stats[grade] = stats_df
 
         # Top 100 수익률 통계
-        if self.top_100_indices is not None and not self.top_100_indices.empty:
+        if not self.top_100_indices.empty:
             top100_df = self.graded_df.loc[self.top_100_indices]
             if isinstance(top100_df, pd.Series):
                 # 단일 row만 선택된 경우 DataFrame으로 변환

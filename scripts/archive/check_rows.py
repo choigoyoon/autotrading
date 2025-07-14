@@ -1,8 +1,9 @@
 import pandas as pd
 from pathlib import Path
+from pandas import DataFrame
 
 # 파일 목록
-files = [
+files: list[tuple[str, str]] = [
     ('1min.parquet', '1분봉'),
     ('3min.parquet', '3분봉'),
     ('5min.parquet', '5분봉'),
@@ -21,11 +22,17 @@ files = [
     ('1week.parquet', '1주')
 ]
 
+base_path = Path('data/processed/btc_usdt_kst/resampled_ohlcv')
+print(f"--- 데이터 행 수 확인 ({base_path}) ---")
+
 # 각 파일 확인
 for f, name in files:
-    path = Path('data/processed/btc_usdt_kst/resampled_ohlcv') / f
+    path = base_path / f
     try:
-        df = pd.read_parquet(path)
+        if not path.exists():
+            print(f"{name}: 파일 없음")
+            continue
+        df: DataFrame = pd.read_parquet(path)
         print(f"{name}: {len(df):,}행")
     except Exception as e:
         print(f"{name} 오류: {e}")

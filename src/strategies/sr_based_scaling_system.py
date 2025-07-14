@@ -42,18 +42,22 @@ class SRBasedScalingSystem:
         :return: 분할 매수 계획 딕셔셔너리, 또는 생성 불가 시 None
         """
         # 1. 지지/저항 레벨 탐지 및 품질 기준 강화
-        sr_levels = self.sr_detector.detect_levels(current_price)
+        # ComprehensiveSRDetector는 'swing_high', 'swing_low' 컬럼이 필요함
+        if not all(col in ohlcv_df.columns for col in ['swing_high', 'swing_low']):
+            logging.warning("S/R 분석에 필요한 'swing_high'/'swing_low' 컬럼이 없어 임시 컬럼을 추가합니다.")
+            ohlcv_df['swing_high'] = 0
+            ohlcv_df['swing_low'] = 0
+
+        sr_clusters = self.sr_detector.detect(ohlcv_df)
         
-        min_sr_strength = 0.75  # Gold 등급 이상만 사용
+        min_sr_strength = 2  # 최소 2개의 포인트로 형성된 클러스터만 사용
         valid_supports = [
-            level for level in sr_levels.get('support_levels', []) 
-            if level.get('strength', 0) >= min_sr_strength and 
-               level.get('touches', 0) >= 5 and
-               level.get('volume_confirmation', False)
+            cluster for cluster in sr_clusters.get('support_clusters', [])
+            if cluster.get('strength', 0) >= min_sr_strength
         ]
 
         if len(valid_supports) < 2:
-            logging.warning(f"품질 기준(강도 {min_sr_strength}, 터치 5회, 거래량 확인)을 충족하는 지지 레벨이 2개 미만이라 거래를 포기합니다.")
+            logging.warning(f"품질 기준(강도 {min_sr_strength})을 충족하는 지지 클러스터가 2개 미만이라 거래를 포기합니다.")
             return None
 
         # 2. ATR 계산 (동적 간격 설정을 위해)
@@ -67,7 +71,7 @@ class SRBasedScalingSystem:
 
         # Stage 1: 즉시 진입
         stage1_support = valid_supports[0]
-        stop_loss_price_s1 = stage1_support['price'] * 0.995 
+        stop_loss_price_s1 = stage1_support['level'] * 0.995 
         base_size_s1 = self.safety_system.calculate_safe_position_size(current_price, stop_loss_price_s1)
         final_size_s1 = base_size_s1 * self.entry_allocations['stage_1']
         entry_plan['stage_1'] = self._create_stage_plan('buy', 1, current_price, final_size_s1, stop_loss_price_s1, stage1_support)
@@ -75,8 +79,8 @@ class SRBasedScalingSystem:
         
         # Stage 2: 2번째 지지선 근처 및 ATR 기반 추가 매수
         stage2_support = valid_supports[1]
-        entry_price_s2 = min(stage2_support['price'] * 1.005, current_price - atr * 1.5) # 지지선 또는 ATR 기반 중 더 낮은 가격
-        stop_loss_price_s2 = stage2_support['price'] * 0.995
+        entry_price_s2 = min(stage2_support['level'] * 1.005, current_price - atr * 1.5)
+        stop_loss_price_s2 = stage2_support['level'] * 0.995
         base_size_s2 = self.safety_system.calculate_safe_position_size(entry_price_s2, stop_loss_price_s2)
         final_size_s2 = base_size_s2 * self.entry_allocations['stage_2']
         entry_plan['stage_2'] = self._create_stage_plan('buy', 2, entry_price_s2, final_size_s2, stop_loss_price_s2, stage2_support)
@@ -85,8 +89,8 @@ class SRBasedScalingSystem:
         # Stage 3: (선택적) 3번째 지지선 근처 및 ATR 기반 추가 매수
         if len(valid_supports) > 2:
             stage3_support = valid_supports[2]
-            entry_price_s3 = min(stage3_support['price'] * 1.005, current_price - atr * 3.0) # 지지선 또는 ATR 기반 중 더 낮은 가격
-            stop_loss_price_s3 = stage3_support['price'] * 0.995
+            entry_price_s3 = min(stage3_support['level'] * 1.005, current_price - atr * 3.0)
+            stop_loss_price_s3 = stage3_support['level'] * 0.995
             base_size_s3 = self.safety_system.calculate_safe_position_size(entry_price_s3, stop_loss_price_s3)
             final_size_s3 = base_size_s3 * self.entry_allocations['stage_3']
             entry_plan['stage_3'] = self._create_stage_plan('buy', 3, entry_price_s3, final_size_s3, stop_loss_price_s3, stage3_support)
@@ -127,19 +131,24 @@ class SRBasedScalingSystem:
             'price': price,
             'size': size,
             'stop_loss': sl,
-            'sr_basis': f"strength={sr_basis['strength']:.2f}, methods={sr_basis['methods']}",
+            'sr_basis': f"strength={sr_basis['strength']}, std={sr_basis['std_dev']:.4f}",
             'status': 'planned'
         }
 
-    def plan_exit_strategy(self, entry_price: float, current_price: float) -> Dict:
+    def plan_exit_strategy(self, entry_price: float, current_price: float, ohlcv_df: pd.DataFrame) -> Dict:
         """
         주어진 진입 가격을 기반으로 3단계 분할 청산 전략을 계획합니다.
         """
-        sr_levels = self.sr_detector.detect_levels(current_price)
-        resistance_levels = [lvl for lvl in sr_levels['resistance_levels'] if lvl['strength'] >= 0.6]
+        if not all(col in ohlcv_df.columns for col in ['swing_high', 'swing_low']):
+            logging.warning("S/R 분석에 필요한 'swing_high'/'swing_low' 컬럼이 없어 임시 컬럼을 추가합니다.")
+            ohlcv_df['swing_high'] = 0
+            ohlcv_df['swing_low'] = 0
 
-        if not resistance_levels:
-            logging.warning("유효한 저항 레벨이 없어 기본 목표가로 청산 전략을 수립합니다.")
+        sr_clusters = self.sr_detector.detect(ohlcv_df)
+        resistance_clusters = [cluster for cluster in sr_clusters.get('resistance_clusters', []) if cluster['strength'] >= 2]
+
+        if not resistance_clusters:
+            logging.warning("유효한 저항 클러스터가 없어 기본 목표가로 청산 전략을 수립합니다.")
             return {
                 'stage_1': {'price': entry_price * 1.03, 'percentage': self.exit_allocations['stage_1']},
                 'stage_2': {'price': entry_price * 1.06, 'percentage': self.exit_allocations['stage_2']},
@@ -148,10 +157,10 @@ class SRBasedScalingSystem:
             
         exit_plan = {}
         # Stage 1 & 2: 저항 레벨 기반
-        if len(resistance_levels) > 0:
-            exit_plan['stage_1'] = {'price': resistance_levels[0]['price'], 'percentage': self.exit_allocations['stage_1'], 'sr_basis': resistance_levels[0]}
-        if len(resistance_levels) > 1:
-            exit_plan['stage_2'] = {'price': resistance_levels[1]['price'], 'percentage': self.exit_allocations['stage_2'], 'sr_basis': resistance_levels[1]}
+        if len(resistance_clusters) > 0:
+            exit_plan['stage_1'] = {'price': resistance_clusters[0]['level'], 'percentage': self.exit_allocations['stage_1'], 'sr_basis': resistance_clusters[0]}
+        if len(resistance_clusters) > 1:
+            exit_plan['stage_2'] = {'price': resistance_clusters[1]['level'], 'percentage': self.exit_allocations['stage_2'], 'sr_basis': resistance_clusters[1]}
         
         # Stage 3: 트레일링 스탑
         exit_plan['stage_3'] = {'price': 'trailing_stop', 'percentage': self.exit_allocations['stage_3'], 'trigger': 'macd_reversal_or_time_limit'}
@@ -172,10 +181,15 @@ if __name__ == '__main__':
     price_data[250:260] = price_data[250:260] - 800 # 강력한 지지선 생성
     sample_df = pd.DataFrame({
         'open': price_data - 10, 'high': price_data + 100, 'low': price_data - 100,
-        'close': price_data, 'volume': np.random.randint(100, 1000, 500)
+        'close': price_data, 'volume': np.random.randint(100, 1000, 500),
+        'swing_high': 0, 'swing_low': 0 # 테스트를 위해 컬럼 추가
     }, index=dates)
+    # 스윙 포인트 예시 설정
+    sample_df.at[sample_df.index[255], 'swing_low'] = 1
+    sample_df.at[sample_df.index[450], 'swing_high'] = 1
 
-    sr_detector = ComprehensiveSRDetector(sample_df, timeframe='4h')
+
+    sr_detector = ComprehensiveSRDetector()
 
     # 3. 분할 매매 시스템 초기화
     scaling_system = SRBasedScalingSystem(safety_system, sr_detector)
@@ -199,7 +213,7 @@ if __name__ == '__main__':
     # 5. 시나리오 실행: 분할 청산 계획
     avg_entry_price = 39800 # 진입 성공했다고 가정
     print(f"\n시나리오: 분할 청산 계획 (평균 진입가: {avg_entry_price:.2f})")
-    exit_strategy = scaling_system.plan_exit_strategy(avg_entry_price, current_price)
+    exit_strategy = scaling_system.plan_exit_strategy(avg_entry_price, current_price, sample_df)
     
     if exit_strategy:
         print("\n--- 생성된 분할 청산 전략 ---")

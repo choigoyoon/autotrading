@@ -2,7 +2,14 @@
 
 import pandas as pd
 import numpy as np
-import talib
+import talib # type: ignore
+import sys
+from pathlib import Path
+
+# 프로젝트 루트를 sys.path에 추가
+project_root = Path(__file__).resolve().parents[2]
+if str(project_root) not in sys.path:
+    sys.path.append(str(project_root))
 
 # --- 4단계 검증 함수 (V1 시스템) ---
 
@@ -38,14 +45,18 @@ def calculate_divergence_quality_score(df: pd.DataFrame, signal_idx: pd.Timestam
     if prev_peak_idx is None or prev_peak_idx == signal_idx:
         return 0.0
 
-    prev_price = df.loc[prev_peak_idx, 'close']
-    prev_macd_hist = df.loc[prev_peak_idx, 'macd_hist']
+    # 타입 안정성 확보
+    prev_peak_ts = pd.to_datetime(prev_peak_idx)
+    signal_ts = pd.to_datetime(signal_idx)
+
+    prev_price = df.loc[prev_peak_ts, 'close']
+    prev_macd_hist = df.loc[prev_peak_ts, 'macd_hist']
     
     # 값들이 숫자인지 확인
     if not all(pd.notna(v) and isinstance(v, (int, float)) for v in [current_price, prev_price, current_macd_hist, prev_macd_hist]):
         return 0.0
 
-    duration = (signal_idx - prev_peak_idx).total_seconds() / 3600
+    duration = (signal_ts - prev_peak_ts).total_seconds() / 3600
     duration_score = min(float(duration) / 24.0, 1.0)
     
     price_change_pct = (current_price - prev_price) / prev_price if prev_price != 0 else 0.0

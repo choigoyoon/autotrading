@@ -1,8 +1,16 @@
 import pandas as pd
 import numpy as np
-import pandas_ta as ta
+import pandas_ta as ta # type: ignore
 from scipy.stats import linregress
 from scipy.signal import find_peaks
+import sys
+from pathlib import Path
+
+# 프로젝트 루트를 sys.path에 추가
+project_root = Path(__file__).resolve().parents[2]
+if str(project_root) not in sys.path:
+    sys.path.append(str(project_root))
+
 
 def calculate_momentum_exhaustion_score(df: pd.DataFrame, lookback: int = 10) -> pd.Series:
     """
@@ -70,10 +78,10 @@ def detect_dual_divergence_confirmation(df: pd.DataFrame, macd_fast=12, macd_slo
     if df.empty:
         return pd.Series(False, index=df.index)
         
-    # 저점 찾기 (음수 값에 대해 find_peaks 사용, .mul(-1)로 타입 안정성 확보)
-    price_lows_idx, _ = find_peaks(df['low'].mul(-1).values, distance=distance)
-    macd_lows_idx, _ = find_peaks(df['macd_line'].mul(-1).values, distance=distance)
-    rsi_lows_idx, _ = find_peaks(df['rsi'].mul(-1).values, distance=distance)
+    # 저점 찾기 (음수 값에 대해 find_peaks 사용, .to_numpy()로 타입 안정성 확보)
+    price_lows_idx, _ = find_peaks(df['low'].mul(-1).to_numpy(), distance=distance)
+    macd_lows_idx, _ = find_peaks(df['macd_line'].mul(-1).to_numpy(), distance=distance)
+    rsi_lows_idx, _ = find_peaks(df['rsi'].mul(-1).to_numpy(), distance=distance)
     
     bullish_divergence = pd.Series(False, index=df.index)
 
@@ -163,9 +171,127 @@ def analyze_orderly_decline_pattern(df: pd.DataFrame, signal_indices: pd.Index, 
         
         # 하락 추세일 경우에만 품질 점수 계산 (기울기가 음수)
         if isinstance(slope, (int, float)) and slope < 0 and isinstance(r_value, (int, float)):
-            decline_quality.loc[idx] = r_value**2
+            decline_quality.loc[idx] = float(r_value**2)
             
     return decline_quality.reindex(signal_indices).fillna(0)
+
+
+class SignalAuthenticator:
+    """
+    다이버전스 신호의 '진정성'을 여러 보조 지표를 통해 검증하고 점수화합니다.
+    """
+    def __init__(self, df: pd.DataFrame, divergence_info: dict | None = None, config: dict | None = None):
+        self.df = df
+        self.divergence = divergence_info if divergence_info is not None else {}
+        self.config = config or self._get_default_config()
+        
+        price_points = self.divergence.get('price_points')
+        if isinstance(price_points, tuple) and len(price_points) == 2:
+            self.p1_idx = price_points[0]
+            self.p2_idx = price_points[1]
+        else:
+            self.p1_idx, self.p2_idx = None, None
+
+    def _get_default_config(self) -> dict:
+        return {
+            "volume_spike_window": 5,
+            "volume_spike_multiplier": 2.0,
+            "weights": {
+                "volume": 0.4,
+                "rsi": 0.3,
+                "pattern": 0.3
+            }
+        }
+
+    def _check_volume_spike(self) -> float:
+        """두 번째 저점에서 거래량 급증을 확인합니다."""
+        if self.p1_idx is None or self.p2_idx is None:
+            return 0.0
+
+        window = self.config['volume_spike_window']
+        multiplier = self.config['volume_spike_multiplier']
+        
+        # 두 번째 저점 이전의 평균 거래량 계산
+        lookback_start = max(0, self.p2_idx - window)
+        if lookback_start >= self.p2_idx:
+            return 0.0
+
+        avg_volume = self.df['volume'].iloc[lookback_start:self.p2_idx].mean()
+        volume_at_p2 = self.df['volume'].iloc[self.p2_idx]
+
+        if avg_volume > 0 and volume_at_p2 > avg_volume * multiplier:
+            return 1.0
+        
+        # 점진적 점수
+        if avg_volume > 0:
+            score = volume_at_p2 / (avg_volume * multiplier)
+            return min(score, 1.0)
+            
+        return 0.0
+
+    def _check_rsi_concordance(self) -> float:
+        """RSI 동조성을 확인합니다. MACD와 RSI 모두에서 다이버전스가 관찰되는지 확인합니다."""
+        if self.p1_idx is None or self.p2_idx is None or self.divergence is None:
+            return 0.0
+
+        # RSI 계산
+        if 'rsi' not in self.df.columns:
+            self.df['rsi'] = ta.rsi(self.df['close'])
+
+        rsi = self.df['rsi'].values
+        
+        # 다이버전스 타입에 따라 RSI 저점/고점 확인
+        divergence_type = self.divergence.get('type', 'bullish')
+        
+        if divergence_type == 'bullish':
+            # RSI 저점도 높아지는지 확인
+            if rsi[self.p2_idx] > rsi[self.p1_idx]:
+                return 1.0
+        elif divergence_type == 'bearish':
+            # RSI 고점도 낮아지는지 확인
+            if rsi[self.p2_idx] < rsi[self.p1_idx]:
+                return 1.0
+                
+        return 0.0
+
+    def _check_reversal_pattern(self) -> float:
+        """주요 반전 캔들 패턴(상승장악형, 망치형 등)이 p2 지점에서 발생하는지 확인합니다."""
+        if self.p2_idx is None:
+            return 0.0
+
+        # pandas-ta를 사용하여 주요 반전 캔들 패턴 탐지
+        # 상승장악형(100), 망치형(100), 상승반격형(100) 등
+        engulfing = self.df.ta.cdl_engulfing().iloc[self.p2_idx]
+        hammer = self.df.ta.cdl_hammer().iloc[self.p2_idx]
+        
+        # 다른 주요 강세 반전 패턴 추가 가능
+        # cdl_morningstar, cdl_piercing, cdl_bullish_harami 등
+
+        if (engulfing is not None and engulfing > 0) or \
+           (hammer is not None and hammer > 0):
+            return 1.0
+            
+        return 0.0
+
+    def authenticate(self) -> dict:
+        """모든 검증을 수행하고 최종 점수를 반환합니다."""
+        volume_score = self._check_volume_spike()
+        rsi_score = self._check_rsi_concordance()
+        pattern_score = self._check_reversal_pattern()
+        
+        weights = self.config['weights']
+        final_score = (
+            volume_score * weights['volume'] +
+            rsi_score * weights['rsi'] +
+            pattern_score * weights['pattern']
+        )
+        
+        return {
+            "final_authenticity_score": round(final_score, 4),
+            "volume_score": round(volume_score, 4),
+            "rsi_score": round(rsi_score, 4),
+            "pattern_score": round(pattern_score, 4)
+        }
 
 
 # --- 예시 및 테스트 코드 ---
@@ -196,13 +322,13 @@ def _create_test_data():
     df['rsi'] = df.ta.rsi()
     
     # 다이버전스 시나리오 (가격을 더 낮추고 지표는 높임)
-    price_low_1 = "2023-02-15"
-    price_low_2 = "2023-03-15"
-    df.loc[price_low_1, 'low'] -= 3
-    df.loc[price_low_2, 'low'] -= 5 # 더 낮은 저점
-    
+    price_low_1 = pd.Timestamp("2023-02-15")
+    price_low_2 = pd.Timestamp("2023-03-15")
+    df.at[price_low_1, 'low'] = df.at[price_low_1, 'low'] - 3
+    df.at[price_low_2, 'low'] = df.at[price_low_2, 'low'] - 5  # 더 낮은 저점
+
     # 지표 저점은 높게
-    df.loc[price_low_1, 'macd_line'] = -1.5
+    df.at[price_low_1, 'macd_line'] = -1.5
     df.loc[price_low_2, 'macd_line'] = -0.5
     df.loc[price_low_1, 'rsi'] = 25
     df.loc[price_low_2, 'rsi'] = 35

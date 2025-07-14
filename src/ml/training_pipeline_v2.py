@@ -2,7 +2,7 @@ import torch
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Any, cast, Literal
 import json
 import logging
 from collections import defaultdict
@@ -31,7 +31,7 @@ class TradingDataset(torch.utils.data.Dataset):
         self,
         data_dir: str,
         split: str = 'train',
-        timeframes: List[str] = None,
+        timeframes: Optional[List[str]] = None,
         seq_length: int = 100,
         target_length: int = 10,
         train_ratio: float = 0.8,
@@ -245,7 +245,7 @@ def collate_fn(batch):
         all_timeframes.update(x.keys())
     
     # Initialize batched data
-    batched_x = {tf: [] for tf in all_timeframes}
+    batched_x_list = {tf: [] for tf in all_timeframes}
     batched_y = {
         'direction': [],
         'magnitude': [],
@@ -262,7 +262,7 @@ def collate_fn(batch):
         # Add data for each timeframe
         for tf in all_timeframes:
             if tf in x:
-                batched_x[tf].append(x[tf])
+                batched_x_list[tf].append(x[tf])
             else:
                 # If timeframe is missing, use zeros with the same shape as other samples
                 # This should be handled by the model if needed
@@ -281,12 +281,13 @@ def collate_fn(batch):
         batched_returns.append(returns)
     
     # Stack tensors
-    for tf in batched_x:
-        if batched_x[tf]:
-            batched_x[tf] = torch.stack(batched_x[tf])
+    batched_x = {}
+    for tf in batched_x_list:
+        if batched_x_list[tf]:
+            batched_x[tf] = torch.stack(batched_x_list[tf])
     
     # Stack targets
-    batched_y = {k: torch.stack(v) for k, v in batched_y.items()}
+    batched_y = {k: torch.stack(v) for k, v in batched_y.items() if v}
     
     # Stack returns
     batched_returns = torch.stack(batched_returns) if batched_returns else None
@@ -301,8 +302,8 @@ class TrainingPipeline:
         data_dir: str,
         model_dir: str = 'models',
         results_dir: str = 'results',
-        device: str = None,
-        timeframes: List[str] = None,
+        device: Optional[str] = None,
+        timeframes: Optional[List[str]] = None,
         seq_length: int = 100,
         target_length: int = 10,
         batch_size: int = 64,
@@ -319,7 +320,11 @@ class TrainingPipeline:
         self.results_dir.mkdir(parents=True, exist_ok=True)
         
         # Set device
-        self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device: Literal['cuda', 'cpu']
+        if device in ('cuda', 'cpu'):
+            self.device = device
+        else:
+            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         logger.info(f"Using device: {self.device}")
         
         # Training parameters
@@ -335,15 +340,14 @@ class TrainingPipeline:
         
         # Initialize model and optimizer
         self.model_config = ModelConfig(
-            input_dim=40,  # Number of features
-            model_dim=256,
-            num_heads=8,
-            num_layers=6,
+            feature_dims={tf: 40 for tf in self.timeframes},  # Assuming 40 features for all timeframes
+            d_model=256,
+            n_heads=8,
+            n_layers=6,
+            d_ff=512,
             dropout=0.1,
+            timeframes=self.timeframes,
             max_seq_len=seq_length,
-            num_tasks=5,  # direction, magnitude, duration, confidence, risk
-            task_weights=(0.3, 0.2, 0.1, 0.2, 0.2),
-            timeframe_hierarchy=self.timeframes
         )
         
         self.loss_config = LossConfig(
@@ -363,7 +367,7 @@ class TrainingPipeline:
         self.adaptive_system = AdaptiveLearningSystem(
             model_config=self.model_config,
             loss_config=self.loss_config,
-            device=self.device,
+            device=cast(Any, self.device),
             model_dir=str(self.model_dir / 'adaptive')
         )
         
@@ -396,7 +400,7 @@ class TrainingPipeline:
         
         # Create datasets
         train_dataset = TradingDataset(
-            data_dir=self.data_dir,
+            data_dir=str(self.data_dir),
             split='train',
             timeframes=self.timeframes,
             seq_length=self.seq_length,
@@ -405,7 +409,7 @@ class TrainingPipeline:
         )
         
         val_dataset = TradingDataset(
-            data_dir=self.data_dir,
+            data_dir=str(self.data_dir),
             split='val',
             timeframes=self.timeframes,
             seq_length=self.seq_length,
@@ -414,7 +418,7 @@ class TrainingPipeline:
         )
         
         test_dataset = TradingDataset(
-            data_dir=self.data_dir,
+            data_dir=str(self.data_dir),
             split='test',
             timeframes=self.timeframes,
             seq_length=self.seq_length,
@@ -505,7 +509,9 @@ class TrainingPipeline:
     
     def _train_epoch(self) -> Dict[str, float]:
         """Train for one epoch"""
-        self.adaptive_system.ensemble.train()
+        assert self.train_loader is not None
+        for model in self.adaptive_system.ensemble.models.values():
+            model.train()
         
         epoch_metrics = defaultdict(float)
         num_batches = 0
@@ -545,15 +551,15 @@ class TrainingPipeline:
                 )
             
             # Backward pass
-            self.adaptive_system.optimizers[regime].zero_grad()
+            self.adaptive_system.ensemble.optimizers[regime].zero_grad()
             
             if self.device.startswith('cuda'):
                 self.scaler.scale(loss_dict['total']).backward()
-                self.scaler.step(self.adaptive_system.optimizers[regime])
+                self.scaler.step(self.adaptive_system.ensemble.optimizers[regime])
                 self.scaler.update()
             else:
                 loss_dict['total'].backward()
-                self.adaptive_system.optimizers[regime].step()
+                self.adaptive_system.ensemble.optimizers[regime].step()
             
             # Update metrics
             batch_size = len(next(iter(x.values())))
@@ -579,7 +585,9 @@ class TrainingPipeline:
     
     def _validate(self) -> Dict[str, float]:
         """Validate the model"""
-        self.adaptive_system.ensemble.eval()
+        assert self.val_loader is not None
+        for model in self.adaptive_system.ensemble.models.values():
+            model.eval()
         
         val_metrics = defaultdict(float)
         num_batches = 0
@@ -639,7 +647,9 @@ class TrainingPipeline:
         if self.test_loader is None:
             self.prepare_data()
         
-        self.adaptive_system.ensemble.eval()
+        assert self.test_loader is not None
+        for model in self.adaptive_system.ensemble.models.values():
+            model.eval()
         
         test_metrics = defaultdict(float)
         num_batches = 0
@@ -772,8 +782,8 @@ class TrainingPipeline:
             adaptive_system_path = self.model_dir / 'adaptive'
             if adaptive_system_path.exists():
                 self.adaptive_system = AdaptiveLearningSystem.load(
-                    str(adaptive_system_path),
-                    device=self.device
+                    adaptive_system_path,
+                    device=cast(Any, self.device)
                 )
             
             # Update training state

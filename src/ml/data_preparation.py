@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 from typing import Dict, List, Tuple, Union, Any
 
-import joblib
+import joblib  # type: ignore[reportMissingTypeStubs]
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset

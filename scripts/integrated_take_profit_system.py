@@ -2,159 +2,59 @@ import pandas as pd
 from pathlib import Path
 import warnings
 
-# 이전에 생성한 분석 모듈들을 import 합니다.
+# 리팩토링된 핵심 시스템을 src.strategies에서 import
 try:
-    from src.analysis.bounce_statistics_analyzer import BounceStatisticsAnalyzer
-    from src.analysis.multi_timeframe_validator import MultiTimeframeValidator
+    from src.strategies.take_profit_system import IntegratedTakeProfitSystem
 except ImportError as e:
-    print(f"필수 모듈 import 실패: {e}")
-    print("bounce_statistics_analyzer.py와 multi_timeframe_validator.py가 src/analysis/ 경로에 있는지 확인하세요.")
-    # 임시 클래스로 대체하여 기본 구조는 유지
-    class BounceStatisticsAnalyzer: 
-        def __init__(self, *args, **kwargs): pass
-        def calculate_grade_statistics(self): pass
-    class MultiTimeframeValidator: 
-        def __init__(self, *args, **kwargs): pass
-        def analyze_all_timeframes(self, *args, **kwargs): pass
-        def score_environment(self): return 0
+    print(f"핵심 모듈 import 실패: {e}")
+    print("리팩토링된 IntegratedTakeProfitSystem이 src/strategies/ 경로에 있는지 확인하세요.")
+    IntegratedTakeProfitSystem = None
 
 warnings.filterwarnings('ignore', category=FutureWarning)
 
-class IntegratedTakeProfitSystem:
-    """
-    라벨 등급과 시장 환경을 종합하여 동적 익절/손절 전략을 수립합니다.
-    """
-    def __init__(self, base_path: Path):
-        """
-        시스템 초기화 및 분석 모듈 준비
-        """
-        self.base_path = base_path
-        self.bounce_analyzer = BounceStatisticsAnalyzer(base_path)
-        self.mtf_validator = MultiTimeframeValidator(base_path)
-        self.is_ready = False
-        print("IntegratedTakeProfitSystem이 초기화되었습니다.")
-
-    def prepare_analyzers(self):
-        """분석에 필요한 모든 데이터를 준비하고 사전 계산을 수행합니다."""
-        print("사전 분석 모듈 준비 중...")
-        self.bounce_analyzer.calculate_grade_statistics()
-        self.mtf_validator.analyze_all_timeframes()
-        self.is_ready = True
-        print("모든 분석 모듈 준비 완료.")
-
-    def _get_label_info(self, label_timestamp: pd.Timestamp) -> pd.Series:
-        """주어진 타임스탬프에 해당하는 라벨의 상세 정보를 반환합니다."""
-        if not self.is_ready:
-            raise RuntimeError("분석 모듈이 준비되지 않았습니다. prepare_analyzers()를 먼저 호출하세요.")
-
-        graded_df = self.bounce_analyzer.graded_df
-        label_info_row = graded_df[graded_df['timestamp'] == label_timestamp]
-
-        if label_info_row.empty:
-            raise ValueError(f"해당 타임스탬프({label_timestamp})의 라벨 정보를 찾을 수 없습니다.")
-
-        return label_info_row.iloc[0]
-
-    def calculate_base_take_profit(self, label_grade: str) -> float:
-        """라벨 등급에 따라 기본 익절 목표(%)를 반환합니다."""
-        grade_tp_map = {
-            'A_Grade': 0.25, 'B_Grade': 0.15, 'Top100_Profit': 0.45, 'C_Grade': 0.05
-        }
-        base_tp = grade_tp_map.get(label_grade, 0.05)
-        print(f"등급 '{label_grade}'에 대한 기본 익절 목표: {base_tp:.2%}")
-        return base_tp
-
-    def adjust_by_environment(self, base_tp: float, label_timestamp: pd.Timestamp) -> float:
-        """시장 환경 점수에 따라 익절 목표를 조정합니다."""
-        self.mtf_validator.analyze_all_timeframes(at_timestamp=label_timestamp)
-        score = self.mtf_validator.score_environment()
-
-        if score >= 75: multiplier, env_desc = 1.5, "매우 유리"
-        elif 25 <= score < 75: multiplier, env_desc = 1.2, "유리"
-        elif -25 < score < 25: multiplier, env_desc = 1.0, "보통"
-        elif -75 < score <= -25: multiplier, env_desc = 0.7, "불리"
-        else: multiplier, env_desc = 0.5, "매우 불리"
-
-        adjusted_tp = base_tp * multiplier
-        print(f"환경 점수: {score:.2f} ({env_desc}) -> 조정 배수: {multiplier}x")
-        return adjusted_tp
-
-    def set_risk_management(self, label_grade: str, label_type: int) -> dict:
-        """손절선과 최대 보유 기간을 설정합니다. 통계 부재 시 안전한 폴백 로직을 포함합니다."""
-        stats_key = 'Buy_Label (L)' if label_type == 1 else 'Sell_Label (H)'
-        avg_duration = None
-        
-        try:
-            # 1. 특정 등급 통계 시도
-            avg_duration = self.bounce_analyzer.stats[label_grade][stats_key]['avg_duration_tomax_min']
-        except KeyError:
-            try:
-                # 2. 전체(Overall) 통계로 폴백
-                avg_duration = self.bounce_analyzer.stats['Overall'][stats_key]['avg_duration_tomax_min']
-            except KeyError:
-                # 3. 모든 통계 실패 시 기본값 사용
-                avg_duration = 60.0  # 기본값 60분
-                print(f"[경고] '{label_grade}' 및 'Overall' 등급 통계 부재. 기본 보유 기간({avg_duration}분)을 사용합니다.")
-
-        # 계산된 통계가 NaN인 경우 처리
-        if pd.isna(avg_duration):
-            avg_duration = 60.0
-            print(f"[경고] 평균 보유 기간이 NaN입니다. 기본 보유 기간({avg_duration}분)을 사용합니다.")
-
-        return {
-            "stop_loss_pct": -0.05, # 개선 제안: 이 값도 등급/환경에 따라 동적으로 설정 가능
-            "max_holding_period_min": avg_duration * 1.5
-        }
-
-    def get_full_strategy(self, label_timestamp: pd.Timestamp) -> dict:
-        """특정 라벨에 대한 최종 익절/손절 전략을 반환합니다."""
-        print(f"\n===== {label_timestamp} 라벨 전략 분석 시작 =====")
-        
-        label_info = self._get_label_info(label_timestamp)
-        label_type = int(label_info['label_type'])
-
-        # 등급 결정 로직
-        label_index = label_info.name
-        if label_index in self.bounce_analyzer.top_100_indices:
-            label_grade = 'Top100_Profit'
-        else:
-            label_grade = label_info['grade']
-
-        base_tp = self.calculate_base_take_profit(label_grade)
-        adjusted_tp = self.adjust_by_environment(base_tp, label_timestamp)
-        risk_params = self.set_risk_management(label_grade, label_type)
-        
-        final_strategy = {"label_timestamp": label_timestamp, "label_grade": label_grade, "adjusted_take_profit_pct": adjusted_tp, **risk_params}
-        print(f"최종 익절 목표: {adjusted_tp:.2%}, 최종 손절 목표: {risk_params['stop_loss_pct']:.2%}")
-        return final_strategy
-
 if __name__ == '__main__':
-    try:
-        project_root = Path(__file__).resolve().parents[2]
-        tp_system = IntegratedTakeProfitSystem(base_path=project_root)
-        
-        tp_system.prepare_analyzers()
-        
-        graded_df = tp_system.bounce_analyzer.graded_df
-        sample_label_series = graded_df[
-            (graded_df['grade'] == 'A_Grade') & (~graded_df.index.isin(tp_system.bounce_analyzer.top_100_indices))
-        ]
-        
-        if sample_label_series.empty:
-            print("\n분석할 A등급 샘플 라벨을 찾을 수 없습니다. 존재하는 라벨 중 하나로 테스트합니다.")
-            sample_label_series = graded_df
-        
-        sample_timestamp = sample_label_series.iloc[0]['timestamp']
-        
-        strategy = tp_system.get_full_strategy(label_timestamp=sample_timestamp)
-        
-        print("\n--- 최종 전략 결과 ---")
-        for key, value in strategy.items():
-            print(f"{key:<25}: {value:.4f}" if isinstance(value, float) else f"{key:<25}: {value}")
+    if IntegratedTakeProfitSystem is None:
+        print("프로그램을 실행할 수 없습니다. 모듈 임포트 문제를 해결해주세요.")
+    else:
+        try:
+            project_root = Path(__file__).resolve().parents[1]
+            tp_system = IntegratedTakeProfitSystem(base_path=project_root)
+            
+            tp_system.prepare_analyzers()
+            
+            # 여기서부터는 graded_df에 안전하게 접근해야 합니다.
+            # get_graded_labels()는 BounceStatisticsAnalyzer의 메서드여야 합니다.
+            # 이 클래스는 tp_system.bounce_analyzer 내에 있습니다.
+            graded_df = tp_system.bounce_analyzer.get_graded_labels()
+            
+            if graded_df.empty:
+                 raise ValueError("등급이 매겨진 라벨 데이터가 비어있습니다.")
 
-    except (FileNotFoundError, RuntimeError, ValueError) as e:
-        print(f"\n[오류] 실행 중 문제가 발생했습니다: {e}")
-    except Exception as e:
-        import traceback
-        print(f"\n[예상치 못한 오류] {e}")
-        traceback.print_exc()
+            # top_100_indices는 이제 BounceStatisticsAnalyzer에서 항상 초기화됩니다.
+            top_100_indices = tp_system.bounce_analyzer.top_100_indices # type: ignore
+
+            sample_label_series = graded_df[
+                (graded_df['grade'] == 'A_Grade') & (~graded_df.index.isin(top_100_indices))
+            ]
+            
+            if sample_label_series.empty:
+                print("\n분석할 A등급 샘플 라벨을 찾을 수 없습니다. 존재하는 라벨 중 하나로 테스트합니다.")
+                if not graded_df.empty:
+                    sample_label_series = graded_df
+                else:
+                    raise ValueError("테스트할 샘플 라벨이 존재하지 않습니다.")
+
+            sample_timestamp = sample_label_series.iloc[0]['timestamp']
+            
+            strategy = tp_system.get_full_strategy(label_timestamp=sample_timestamp)
+            
+            print("\n--- 최종 전략 결과 ---")
+            for key, value in strategy.items():
+                print(f"{key:<25}: {value:.4f}" if isinstance(value, float) else f"{key:<25}: {value}")
+
+        except (FileNotFoundError, RuntimeError, ValueError) as e:
+            print(f"\n[오류] 실행 중 문제가 발생했습니다: {e}")
+        except Exception as e:
+            import traceback
+            print(f"\n[예상치 못한 오류] {e}")
+            traceback.print_exc()

@@ -59,21 +59,23 @@ def merge_and_sort_labels():
                 continue
             
             # 시간대 정보 통일 (timezone-naive로 변환)
-            if hasattr(df.index, 'tz') and df.index.tz is not None:
+            if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None:
                 df.index = df.index.tz_localize(None)
                 print(f"  🔧 시간대 정보 제거: {timeframe}")
 
-            # 인덱스 타입 확인
+            # 인덱스 타입 확인 (재확인)
             if not isinstance(df.index, pd.DatetimeIndex):
                 print(f"❌ '{file.name}': 인덱스가 DatetimeIndex가 아님 ({type(df.index)})")
                 
                 # 🔧 자동 복구 시도
                 try:
                     if 'timestamp' in df.columns:
-                        df.index = pd.to_datetime(df.columns['timestamp'])
-                        df = df.drop('timestamp', axis=1)
+                        df['timestamp'] = pd.to_datetime(df['timestamp'])
+                        df = df.set_index('timestamp')
                     else:
+                        # 이미 인덱스로 설정된 경우를 대비해 다시 시도
                         df.index = pd.to_datetime(df.index)
+
                     print(f"  ✅ 인덱스 복구 성공: {timeframe}")
                 except Exception as e:
                     print(f"  ❌ 인덱스 복구 실패: {e}")
@@ -126,15 +128,14 @@ def merge_and_sort_labels():
     print("🔄 중복 데이터 제거 중...")
     before_dedup = len(merged_df)
     merged_df = merged_df.reset_index()
-    merged_df = merged_df.drop_duplicates(subset=[merged_df.columns[0], 'timeframe'], keep='first')
+    merged_df = merged_df.drop_duplicates(subset=['timestamp', 'timeframe'], keep='first')
     after_dedup = len(merged_df)
     
     print(f"  📊 중복 제거: {before_dedup:,} → {after_dedup:,} (제거: {before_dedup-after_dedup:,}개)")
     
     # 타임스탬프 기준 정렬
     print("🔄 타임스탬프 기준 정렬 중...")
-    timestamp_col = merged_df.columns[0]  # 첫 번째 컬럼이 타임스탬프
-    merged_df = merged_df.sort_values([timestamp_col, 'timeframe'])
+    merged_df = merged_df.sort_values(['timestamp', 'timeframe'])
     
     # 📊 최종 통계
     total_labels = len(merged_df)
