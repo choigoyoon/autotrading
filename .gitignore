@@ -173,7 +173,6 @@ results/
 results_archive/
 *.html
 *.png
-*.md
 *.txt
 
 # Ignore specific large files if they are not tracked
