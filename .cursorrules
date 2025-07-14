@@ -1,0 +1,19 @@
+# 개발용 Cursor 설정
+# 경량 워크스페이스용
+
+# AI 기능 활성화 (개발용)
+ai_features: full
+memory_limit: 4GB
+file_limit: 5000
+
+# 개발 환경 최적화
+development_mode: true
+auto_complete: true
+semantic_highlighting: true
+
+# 무거운 파일만 제외
+exclude_patterns:
+  - "**/*.pt"
+  - "**/*.pth"
+  - "**/*.csv"
+  - "**/*.parquet"

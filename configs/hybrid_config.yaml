@@ -1,0 +1,91 @@
+# configs/hybrid_config.yaml
+
+# 1. 데이터 및 결과 경로 설정
+data_paths:
+  # 데이터가 저장된 기본 경로 (resampled_ohlcv 폴더 상위)
+  processed_data_path: 'data/processed/btc_usdt_kst/resampled_ohlcv'
+  # 결과 파일이 저장될 기본 경로
+  results_path: 'results'
+
+# 2. 백테스트 대상 타임프레임
+timeframes:
+  # 분석 및 실행할 타임프레임 목록
+  run: ['15min', '1h', '4h', '1d']
+  # 모든 사용 가능한 타임프레임 (참고용)
+  all: ['1min', '3min', '5min', '15min', '30min', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w', '1M']
+
+# 3. 전략 파라미터
+strategy_params:
+  # 강세 다이버전스 탐지 설정
+  divergence:
+    min_price_decline_pct: 0.01      # 두 저점 사이의 최소 가격 하락률 (1%)
+    min_macd_improvement_pct: 0.05   # 두 저점 사이의 최소 MACD 상승률 (5%)
+    max_lookback_candles: 100        # 다이버전스를 찾기 위한 최대 캔들 수
+
+  # 지지/저항(S/R) 클러스터링 설정
+  sr:
+    cluster_eps_pct: 0.005           # S/R 클러스터링 시 가격의 0.5% 내를 같은 군집으로 간주
+    min_cluster_samples: 2           # 클러스터를 형성하기 위한 최소 S/R 포인트 수
+
+  # 진입/청산 조건
+  entry:
+    # 다이버전스 신호가 주요 지지선 근처에서 발생해야 함 (지지선 위 1% 이내)
+    support_proximity_pct: 0.01
+  exit:
+    # 기본 익절/손절 비율
+    take_profit_pct: 0.10            # 10% 수익 시 익절
+    stop_loss_pct: 0.03              # 3% 손실 시 손절
+    # 최대 보유 기간 (캔들 수)
+    max_holding_candles: 96          # 예: 4시간봉 기준 16일
+
+# 4. 레버리지 및 리스크 관리 설정
+leverage_params:
+  leverage: 3                        # 기본 레버리지 배율
+  initial_balance: 100000            # 초기 자본금
+  # 포지션 크기 설정 (켈리 기준 등)
+  position_sizing_method: 'fixed'    # 'fixed' 또는 'kelly'
+  fixed_position_size: 0.1           # 초기 자본의 10%를 각 거래에 할당
+
+# 5. 기존 하이브리드 시스템 설정 (참고용으로 유지)
+hybrid_system:
+  # 시장 상황별 V1, V2 시스템 가중치
+  weights:
+    strong_trend:
+      v1: 0.3
+      v2: 0.7
+    ranging:
+      v1: 0.6
+      v2: 0.4
+    high_volatility:
+      v1: 0.5
+      v2: 0.5
+  
+  # 동적 임계값 조정 설정
+  dynamic_thresholds:
+    enabled: true
+    target_signals_per_month: 20
+    adjustment_factor: 0.05 # 5%씩 조정
+
+# 2. 시장 상황 판단 기준
+market_condition:
+  # ADX를 사용한 추세 강도 측정
+  adx_period: 14
+  adx_strong_trend_threshold: 25 # 이 값 이상이면 강한 추세
+  
+  # ATR을 사용한 변동성 측정 (정규화된 ATR)
+  atr_period: 14
+  atr_high_volatility_threshold: 1.5 # 평균 변동성의 1.5배 이상이면 고변동성
+
+# 3. V1, V2 시스템 필터링 임계값 (최적화된 값 또는 기본값)
+# 이 값들은 Hybrid 시스템의 1차, 2차 필터링에 사용됩니다.
+v1_thresholds:
+  quality_score: 0.7
+  confirmation_score: 0.6
+
+v2_thresholds:
+  # optimize_v2_thresholds.py 결과에서 추천된 값을 기반으로 설정
+  flow_compatibility: 0.7 
+  structure_confidence: 0.5
+  total_score_silver: 0.65
+  total_score_gold: 0.75
+  total_score_platinum: 0.85 

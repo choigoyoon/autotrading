@@ -1,0 +1,14 @@
+{
+    "lookback_hours": 72,
+    "price_similarity_thresh": 0.03,
+    "time_gap_range": [8, 48],
+    "bounce_thresh": 0.02,
+    "macd_rise_thresh": 0.01,
+    "gc_lookahead_hours": 6,
+    "cost_pct": 0.0015,
+    "position_size_pct": 0.05,
+    "sl_pct": 0.015,
+    "tp1_pct": 0.04,
+    "tp2_pct": 0.08,
+    "max_hold_hours": 72
+} 
