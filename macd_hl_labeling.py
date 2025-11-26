@@ -5,7 +5,6 @@ MACD 히스토그램의 부호 전환 지점을 기반으로 H/L을 탐지합니
 
 import pandas as pd
 import numpy as np
-from ta.trend import MACD
 
 
 class MACDHighLowLabeler:
@@ -24,7 +23,7 @@ class MACDHighLowLabeler:
 
     def calculate_macd(self, df):
         """
-        MACD 계산
+        MACD 계산 (pandas로 직접 구현)
 
         Args:
             df: OHLCV DataFrame
@@ -34,16 +33,18 @@ class MACDHighLowLabeler:
         """
         df = df.copy()
 
-        macd = MACD(
-            close=df['close'],
-            window_fast=self.fast,
-            window_slow=self.slow,
-            window_sign=self.signal
-        )
+        # EMA 계산
+        ema_fast = df['close'].ewm(span=self.fast, adjust=False).mean()
+        ema_slow = df['close'].ewm(span=self.slow, adjust=False).mean()
 
-        df['macd'] = macd.macd()
-        df['macd_signal'] = macd.macd_signal()
-        df['macd_hist'] = macd.macd_diff()
+        # MACD 라인
+        df['macd'] = ema_fast - ema_slow
+
+        # 시그널 라인
+        df['macd_signal'] = df['macd'].ewm(span=self.signal, adjust=False).mean()
+
+        # 히스토그램
+        df['macd_hist'] = df['macd'] - df['macd_signal']
 
         return df
 
