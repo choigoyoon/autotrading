@@ -4,10 +4,18 @@ Bybit 거래소의 15분 봉 데이터 수집 + LSTM 기반 BTC 가격 나우캐
 
 ## 시스템 구성
 
+### A. LSTM 나우캐스트 (딥러닝 기반)
 1. **데이터 수집**: Bybit 거래소에서 15분 봉 데이터를 상장 초기부터 수집
 2. **기술적 지표**: RSI, MACD, 볼린저 밴드 등 40+ 기술적 지표 자동 계산
 3. **LSTM 모델**: 딥러닝 기반 시계열 예측 모델로 다음 15분 가격 예측
-4. **실시간 나우캐스트**: 실시간 데이터로 지속적인 가격 예측 및 거래 신호 생성
+4. **실시간 예측**: 실시간 데이터로 지속적인 가격 예측 및 거래 신호 생성
+
+### B. MACD H/L 나우캐스트 (계층적 전파 검증 시스템)
+1. **MACD 라벨링**: MACD 히스토그램 부호 전환 기반 High/Low 자동 감지
+2. **계층적 전파**: 하위 TF(15분→1시간→4시간→1일→3일→1주) H/L 승격 패턴 검증
+3. **시뮬레이션**: 과거 5년 데이터로 실시간 예측 정확도 측정
+4. **통계 분석**: Precision, Recall, F1-Score 등 성능 메트릭 계산
+5. **변곡점 분석**: 역사적 주요 변곡점에서 시스템 작동 여부 검증
 
 ## 기능
 
@@ -158,23 +166,76 @@ python realtime_nowcast.py --once
 - 🟠 **SELL**: 예상 변화 < -0.2%
 - 🔴 **STRONG SELL**: 예상 변화 < -0.5%
 
+## MACD H/L 나우캐스트 검증 워크플로우
+
+### 종합 검증 실행 (5년치 데이터)
+```bash
+python comprehensive_validation.py
+```
+
+이 스크립트는 다음을 자동으로 수행합니다:
+1. 15분봉 데이터를 모든 타임프레임(1H, 4H, 1D, 3D, 1W)으로 리샘플링
+2. 각 타임프레임에서 MACD H/L 라벨링
+3. 계층적 전파 검증 (하위 TF → 상위 TF)
+4. 나우캐스트 시뮬레이션 및 정확도 측정
+5. 주요 변곡점 분석 (코로나 폭락, 2021 ATH, FTX 사태 등)
+6. 종합 리포트 생성 (`validation_reports/` 디렉토리)
+
+### 개별 검증 모듈
+
+**MACD H/L 라벨링:**
+```bash
+python macd_hl_labeling.py
+```
+- 모든 타임프레임에서 H/L 자동 감지
+- H/L 통계 및 평균 간격 계산
+
+**계층적 전파 검증:**
+```bash
+python hierarchical_validation.py
+```
+- 상위 TF H/L이 하위 TF에서 먼저 감지되는지 검증
+- 감지율, 선행 시간 측정
+- 시각화 차트 생성
+
+**나우캐스트 시뮬레이션:**
+```bash
+python nowcast_simulation.py
+```
+- 과거 데이터를 순차 처리하여 실시간 예측 시뮬레이션
+- Confusion Matrix 및 성능 메트릭 계산
+
 ## 파일 구조
 
 ```
 autotrading/
-├── bybit_collector_ccxt.py    # 데이터 수집 (CCXT 버전)
-├── bybit_data_collector.py    # 데이터 수집 (직접 API 버전)
-├── technical_indicators.py    # 기술적 지표 계산 모듈
-├── btc_nowcast_model.py       # LSTM 나우캐스트 모델
-├── train_nowcast.py           # 모델 훈련 스크립트
-├── realtime_nowcast.py        # 실시간 예측 시스템
+# 데이터 수집
+├── bybit_collector_ccxt.py    # CCXT 기반 데이터 수집
+├── bybit_data_collector.py    # 직접 API 호출 버전
 ├── test_collector.py          # 데이터 수집 테스트
 ├── test_ccxt.py              # CCXT 테스트
-├── requirements.txt           # 필요한 패키지 목록
-├── .gitignore                # Git 무시 파일 목록
-├── data/                     # 수집된 CSV 파일 저장
-├── models/                   # 훈련된 모델 저장
+
+# LSTM 나우캐스트
+├── technical_indicators.py    # 기술적 지표 계산 (40+)
+├── btc_nowcast_model.py       # LSTM 모델
+├── train_nowcast.py           # 모델 훈련
+├── realtime_nowcast.py        # 실시간 예측
+
+# MACD H/L 나우캐스트 검증
+├── macd_hl_labeling.py        # MACD H/L 라벨링
+├── hierarchical_validation.py  # 계층적 전파 검증
+├── nowcast_simulation.py      # 나우캐스트 시뮬레이션
+├── comprehensive_validation.py # 종합 검증 시스템
+
+# 설정
+├── requirements.txt           # 필요한 패키지
+├── .gitignore                # Git 무시 파일
 └── README.md                 # 이 파일
+
+# 데이터 및 결과 (git ignore)
+├── data/                     # 수집된 CSV 파일
+├── models/                   # 훈련된 모델
+└── validation_reports/       # 검증 리포트
 ```
 
 ## 문제 해결

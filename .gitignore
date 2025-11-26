@@ -13,6 +13,8 @@ logs/
 *.log
 .DS_Store
 models/
+validation_reports/
 *.h5
 *.keras
 *.pkl
+*.png
