@@ -52,8 +52,8 @@ class NowcastSimulator:
         print(f"\n실시간 감지 시뮬레이션: 15T → {target_upper_tf}")
         print(f"총 15분봉: {len(df_15m)}")
 
-        # 순차 처리
-        for i in range(min_points_15m, len(df_15m), 4):  # 1시간 단위로 진행
+        # 순차 처리 (최적화: 100개 간격으로 샘플링)
+        for i in range(min_points_15m, len(df_15m), 100):  # 25시간 단위로 진행 (충분한 샘플)
             # 현재까지 데이터만 사용 (미래를 모르는 상태)
             current_df_15m = df_15m.iloc[:i].copy()
             current_time = current_df_15m['datetime'].iloc[-1]
