@@ -64,16 +64,16 @@ def calculate_exit_checkboxes(window, entry_price, entry_idx_local, direction, l
     else:
         after_entry['momentum_slow'] = (price_change > 0).rolling(3).sum() >= 2
 
-    # 체크박스 3: 새로운 H/L 형성
+    # 체크박스 3: 새로운 H/L 형성 (1봉 딜레이 - 나우캐스트)
     after_entry['new_hl'] = False
     for idx in after_entry.index:
         if direction == 'long':
-            # 새로운 H 형성 체크
-            if idx in labeled_df.index and labeled_df.loc[idx, 'label'] == 'H':
+            # 이전봉이 H로 확정되었는지 체크 (현재봉에서 확인 가능)
+            if idx-1 in labeled_df.index and labeled_df.loc[idx-1, 'label'] == 'H':
                 after_entry.loc[idx, 'new_hl'] = True
         else:
-            # 새로운 L 형성 체크
-            if idx in labeled_df.index and labeled_df.loc[idx, 'label'] == 'L':
+            # 이전봉이 L로 확정되었는지 체크 (현재봉에서 확인 가능)
+            if idx-1 in labeled_df.index and labeled_df.loc[idx-1, 'label'] == 'L':
                 after_entry.loc[idx, 'new_hl'] = True
 
     # 체크박스 4: 수익 구간별 조건
