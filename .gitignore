@@ -18,3 +18,4 @@ validation_reports/
 *.keras
 *.pkl
 *.png
+optimization_log.txt
