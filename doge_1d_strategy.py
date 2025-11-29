@@ -1,0 +1,499 @@
+"""
+도지코인(DOGE) 1일봉 추세선 돌파 전략
+BTC 15분봉과 동일한 로직 적용
+
+사용법:
+1. DOGE 1일봉 데이터 준비 (CSV 파일 또는 API)
+2. 이 스크립트 실행
+3. 매매 신호 확인
+
+전략:
+- MACD(12,26,9) 히스토그램으로 L/H 라벨링
+- H값 연결 → 하락 추세선 생성
+- 추세선 상향 돌파 → 롱 진입
+- 10일 간격 필터 적용
+- TP 10%, SL 10% (알트코인 변동성 고려)
+"""
+
+import pandas as pd
+import numpy as np
+import requests
+from datetime import datetime, timedelta
+import time
+
+# ═══════════════════════════════════════════════════════════
+# 설정
+# ═══════════════════════════════════════════════════════════
+
+SYMBOL = 'DOGE/USDT'
+TIMEFRAME = '1D'
+
+# MACD 파라미터 (BTC와 동일)
+MACD_FAST = 12
+MACD_SLOW = 26
+MACD_SIGNAL = 9
+
+# TP/SL (알트코인용 - 변동성 고려)
+TP_PCT = 10.0  # 10%
+SL_PCT = 10.0  # 10%
+
+# 필터
+MIN_INTERVAL_DAYS = 10  # 최소 10일 간격
+
+# 수수료
+FEE_TOTAL = 0.11  # 0.11%
+
+# ═══════════════════════════════════════════════════════════
+# 1. 데이터 로드 함수
+# ═══════════════════════════════════════════════════════════
+
+def load_doge_data_from_csv(csv_path):
+    """
+    CSV 파일에서 DOGE 데이터 로드
+
+    CSV 형식:
+    Date,Open,High,Low,Close,Volume
+    2020-01-01,0.002,0.0021,0.0019,0.002,1000000
+    ...
+    """
+    df = pd.read_csv(csv_path)
+    df['datetime'] = pd.to_datetime(df['Date'])
+    df = df.rename(columns={
+        'Open': 'open',
+        'High': 'high',
+        'Low': 'low',
+        'Close': 'close',
+        'Volume': 'volume'
+    })
+    df = df.sort_values('datetime').reset_index(drop=True)
+    return df[['datetime', 'open', 'high', 'low', 'close', 'volume']]
+
+def load_doge_data_from_binance(days=1825):
+    """
+    Binance API에서 DOGE 데이터 수집 (대체 방법)
+    """
+    url = "https://api.binance.com/api/v3/klines"
+
+    all_data = []
+    end_time = int(time.time() * 1000)
+
+    # 1000개씩 수집
+    for _ in range(2):  # 2000일
+        params = {
+            'symbol': 'DOGEUSDT',
+            'interval': '1d',
+            'limit': 1000,
+            'endTime': end_time
+        }
+
+        try:
+            response = requests.get(url, params=params, timeout=10)
+            data = response.json()
+
+            if not isinstance(data, list):
+                break
+
+            all_data.extend(data)
+
+            if len(data) < 1000:
+                break
+
+            end_time = int(data[0][0]) - 1
+            time.sleep(0.5)
+
+        except Exception as e:
+            print(f"API 오류: {e}")
+            break
+
+    # 데이터프레임 변환
+    df = pd.DataFrame(all_data, columns=[
+        'timestamp', 'open', 'high', 'low', 'close', 'volume',
+        'close_time', 'quote_volume', 'trades', 'taker_buy_base',
+        'taker_buy_quote', 'ignore'
+    ])
+
+    df['timestamp'] = pd.to_numeric(df['timestamp'])
+    df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
+    df['open'] = pd.to_numeric(df['open'])
+    df['high'] = pd.to_numeric(df['high'])
+    df['low'] = pd.to_numeric(df['low'])
+    df['close'] = pd.to_numeric(df['close'])
+    df['volume'] = pd.to_numeric(df['volume'])
+
+    df = df.sort_values('timestamp').reset_index(drop=True)
+
+    return df[['datetime', 'open', 'high', 'low', 'close', 'volume']]
+
+# ═══════════════════════════════════════════════════════════
+# 2. MACD 계산
+# ═══════════════════════════════════════════════════════════
+
+def calculate_macd(df, fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_SIGNAL):
+    """MACD 계산"""
+    ema_fast = df['close'].ewm(span=fast).mean()
+    ema_slow = df['close'].ewm(span=slow).mean()
+
+    macd = ema_fast - ema_slow
+    macd_signal = macd.ewm(span=signal).mean()
+    macd_hist = macd - macd_signal
+
+    df['macd'] = macd
+    df['macd_signal'] = macd_signal
+    df['macd_hist'] = macd_hist
+
+    return df
+
+# ═══════════════════════════════════════════════════════════
+# 3. L/H 라벨링
+# ═══════════════════════════════════════════════════════════
+
+def label_hl(df):
+    """L/H 라벨링 (MACD 히스토그램 크로스)"""
+    df['label'] = None
+    df['label_price'] = None
+
+    for i in range(1, len(df)):
+        prev_hist = df.iloc[i-1]['macd_hist']
+        curr_hist = df.iloc[i]['macd_hist']
+
+        # 음수 → 양수 = L (저점)
+        if prev_hist < 0 and curr_hist >= 0:
+            df.loc[df.index[i], 'label'] = 'L'
+            df.loc[df.index[i], 'label_price'] = df.iloc[i]['low']
+
+        # 양수 → 음수 = H (고점)
+        elif prev_hist >= 0 and curr_hist < 0:
+            df.loc[df.index[i], 'label'] = 'H'
+            df.loc[df.index[i], 'label_price'] = df.iloc[i]['high']
+
+    return df
+
+# ═══════════════════════════════════════════════════════════
+# 4. 추세선 생성
+# ═══════════════════════════════════════════════════════════
+
+def generate_trendlines(df, min_touches=2):
+    """
+    하락 추세선 생성 (H값 연결)
+
+    하락 추세선 = 저항선
+    → 상향 돌파 시 롱 진입
+    """
+    labeled = df[df['label'] == 'H'].copy()
+    trendlines = []
+
+    for i in range(len(labeled) - min_touches + 1):
+        sequence = [i]
+        current_price = labeled.iloc[i]['label_price']
+
+        for j in range(i + 1, len(labeled)):
+            next_price = labeled.iloc[j]['label_price']
+
+            # 하락 추세 (가격이 낮아짐)
+            if next_price < current_price:
+                sequence.append(j)
+                current_price = next_price
+            # 상승하면 추세선 종료
+            elif next_price > current_price * 1.02:
+                break
+
+        if len(sequence) >= min_touches:
+            start_idx = labeled.index[sequence[0]]
+            end_idx = labeled.index[sequence[-1]]
+
+            start_price = labeled.iloc[sequence[0]]['label_price']
+            end_price = labeled.iloc[sequence[-1]]['label_price']
+
+            duration = end_idx - start_idx
+            slope = (end_price - start_price) / duration if duration > 0 else 0
+
+            trendlines.append({
+                'start_idx': start_idx,
+                'end_idx': end_idx,
+                'start_price': start_price,
+                'end_price': end_price,
+                'slope': slope,
+                'touches': len(sequence),
+            })
+
+    return trendlines
+
+# ═══════════════════════════════════════════════════════════
+# 5. 돌파 감지
+# ═══════════════════════════════════════════════════════════
+
+def detect_breakouts(df, trendlines):
+    """추세선 상향 돌파 감지"""
+    breakouts = []
+
+    for tl in trendlines:
+        start_idx = tl['start_idx']
+        end_idx = tl['end_idx']
+
+        # 추세선 이후 100일 스캔
+        search_end = min(end_idx + 100, len(df) - 1)
+
+        for i in range(end_idx, search_end):
+            # 추세선 가격 계산
+            tl_price = tl['start_price'] + tl['slope'] * (i - start_idx)
+
+            current_close = df.iloc[i]['close']
+
+            # 상향 돌파?
+            if current_close > tl_price:
+                if i > 0:
+                    prev_close = df.iloc[i-1]['close']
+                    prev_tl = tl['start_price'] + tl['slope'] * (i - 1 - start_idx)
+
+                    # 이전 봉: 아래, 현재 봉: 위
+                    if prev_close <= prev_tl:
+                        breakouts.append({
+                            'break_idx': i,
+                            'break_price': current_close,
+                            'tl_price': tl_price,
+                            'datetime': df.iloc[i]['datetime'],
+                        })
+                        break
+
+    return breakouts
+
+# ═══════════════════════════════════════════════════════════
+# 6. 간격 필터
+# ═══════════════════════════════════════════════════════════
+
+def filter_consecutive_signals(breakouts, min_interval=MIN_INTERVAL_DAYS):
+    """
+    연속 신호 필터링
+
+    최소 N일 간격 유지
+    """
+    filtered = []
+    last_idx = -999
+
+    for bp in breakouts:
+        if bp['break_idx'] - last_idx >= min_interval:
+            filtered.append(bp)
+            last_idx = bp['break_idx']
+
+    return filtered
+
+# ═══════════════════════════════════════════════════════════
+# 7. 백테스트
+# ═══════════════════════════════════════════════════════════
+
+def backtest(df, breakouts, tp_pct=TP_PCT, sl_pct=SL_PCT):
+    """
+    백테스트 실행
+
+    TP/SL 체크 → 출구 결정
+    """
+    trades = []
+
+    for bp in breakouts:
+        break_idx = bp['break_idx']
+        entry_price = bp['break_price']
+
+        tp_price = entry_price * (1 + tp_pct / 100)
+        sl_price = entry_price * (1 - sl_pct / 100)
+
+        # 향후 50일 스캔
+        max_idx = min(break_idx + 50, len(df) - 1)
+        future = df.iloc[break_idx:max_idx+1]
+
+        exit_price = None
+        exit_type = None
+        exit_date = None
+
+        for i in range(1, len(future)):
+            candle = future.iloc[i]
+
+            # TP 먼저 체크
+            if candle['high'] >= tp_price:
+                exit_price = tp_price
+                exit_type = 'TP'
+                exit_date = candle['datetime']
+                break
+
+            # SL 체크
+            if candle['low'] <= sl_price:
+                exit_price = sl_price
+                exit_type = 'SL'
+                exit_date = candle['datetime']
+                break
+
+        # 50일 내 TP/SL 미도달 시 시장가 청산
+        if exit_price is None:
+            exit_price = future.iloc[-1]['close']
+            exit_type = 'TIMEOUT'
+            exit_date = future.iloc[-1]['datetime']
+
+        pnl = (exit_price - entry_price) / entry_price * 100
+
+        trades.append({
+            'entry_date': bp['datetime'],
+            'entry_price': entry_price,
+            'exit_date': exit_date,
+            'exit_price': exit_price,
+            'exit_type': exit_type,
+            'pnl': pnl,
+            'pnl_after_fee': pnl - FEE_TOTAL,
+        })
+
+    return pd.DataFrame(trades)
+
+# ═══════════════════════════════════════════════════════════
+# 8. 성과 분석
+# ═══════════════════════════════════════════════════════════
+
+def analyze_performance(trades_df):
+    """성과 분석 및 리포트 출력"""
+
+    if len(trades_df) == 0:
+        print("\n⚠️ 거래 없음")
+        return
+
+    print("\n" + "=" * 70)
+    print("DOGE 1일봉 백테스트 결과")
+    print("=" * 70)
+
+    # 기본 통계
+    total_trades = len(trades_df)
+    win_rate = (trades_df['pnl_after_fee'] > 0).sum() / total_trades * 100
+    avg_pnl = trades_df['pnl_after_fee'].mean()
+
+    print(f"\n기본 통계:")
+    print(f"  총 거래: {total_trades}개")
+    print(f"  승률: {win_rate:.1f}%")
+    print(f"  평균 PnL: {avg_pnl:.2f}% (수수료 후)")
+
+    # 출구 타입 분포
+    print(f"\n출구 타입:")
+    for exit_type in ['TP', 'SL', 'TIMEOUT']:
+        count = (trades_df['exit_type'] == exit_type).sum()
+        pct = count / total_trades * 100
+        print(f"  {exit_type}: {count}개 ({pct:.1f}%)")
+
+    # 연도별 성과
+    if 'entry_date' in trades_df.columns:
+        trades_df['year'] = pd.to_datetime(trades_df['entry_date']).dt.year
+        years = sorted(trades_df['year'].unique())
+
+        if len(years) > 1:
+            print(f"\n연도별 성과:")
+            for year in years:
+                year_trades = trades_df[trades_df['year'] == year]
+                yr_count = len(year_trades)
+                yr_win = (year_trades['pnl_after_fee'] > 0).sum() / yr_count * 100
+                yr_avg = year_trades['pnl_after_fee'].mean()
+
+                print(f"  {year}: {yr_count}개, 승률 {yr_win:.1f}%, 평균 {yr_avg:+.2f}%")
+
+    # 최종 수익
+    print(f"\n최종 수익:")
+
+    # 복리 계산
+    balance = 1000
+    for pnl in trades_df['pnl_after_fee']:
+        balance *= (1 + pnl / 100)
+
+    total_return = (balance - 1000) / 1000 * 100
+
+    # 기간 계산
+    if 'entry_date' in trades_df.columns:
+        start_date = pd.to_datetime(trades_df['entry_date'].min())
+        end_date = pd.to_datetime(trades_df['entry_date'].max())
+        total_years = (end_date - start_date).days / 365
+
+        if total_years > 0:
+            annual_return = total_return / total_years
+            print(f"  기간: {start_date.date()} ~ {end_date.date()} ({total_years:.1f}년)")
+            print(f"  총 수익: {total_return:.1f}%")
+            print(f"  연간 수익: {annual_return:.1f}%")
+
+    print(f"  최종 잔고: ${balance:,.2f} (초기 $1,000)")
+
+    # MDD
+    cumulative = (1 + trades_df['pnl_after_fee'] / 100).cumprod()
+    peak = cumulative.expanding(min_periods=1).max()
+    drawdown = (cumulative - peak) / peak * 100
+    mdd = drawdown.min()
+
+    print(f"\nMDD: {mdd:.2f}%")
+
+    print("\n" + "=" * 70)
+
+# ═══════════════════════════════════════════════════════════
+# 9. 메인 실행
+# ═══════════════════════════════════════════════════════════
+
+def main():
+    """메인 실행 함수"""
+
+    print("=" * 70)
+    print("DOGE 1일봉 추세선 돌파 전략")
+    print("=" * 70)
+
+    print(f"\n전략 설정:")
+    print(f"  MACD: ({MACD_FAST}, {MACD_SLOW}, {MACD_SIGNAL})")
+    print(f"  TP/SL: {TP_PCT}% / {SL_PCT}%")
+    print(f"  최소 간격: {MIN_INTERVAL_DAYS}일")
+
+    # 1. 데이터 로드
+    print(f"\n1. 데이터 로드...")
+
+    try:
+        # 방법 1: CSV 파일 (권장)
+        # df = load_doge_data_from_csv('doge_1d_data.csv')
+
+        # 방법 2: Binance API
+        df = load_doge_data_from_binance(days=1825)
+
+        print(f"  ✓ 수집 완료: {len(df)}개 캔들")
+        print(f"  ✓ 기간: {df['datetime'].min()} ~ {df['datetime'].max()}")
+
+    except Exception as e:
+        print(f"  ✗ 데이터 로드 실패: {e}")
+        return
+
+    # 2. MACD 계산
+    print(f"\n2. MACD 계산...")
+    df = calculate_macd(df)
+    print(f"  ✓ 완료")
+
+    # 3. L/H 라벨링
+    print(f"\n3. L/H 라벨링...")
+    df = label_hl(df)
+    l_count = (df['label'] == 'L').sum()
+    h_count = (df['label'] == 'H').sum()
+    print(f"  ✓ L: {l_count}개, H: {h_count}개")
+
+    # 4. 추세선 생성
+    print(f"\n4. 추세선 생성...")
+    trendlines = generate_trendlines(df, min_touches=2)
+    print(f"  ✓ 하락 추세선: {len(trendlines)}개")
+
+    # 5. 돌파 감지
+    print(f"\n5. 돌파 감지...")
+    breakouts = detect_breakouts(df, trendlines)
+    print(f"  ✓ 돌파 신호: {len(breakouts)}개")
+
+    # 6. 간격 필터
+    print(f"\n6. 간격 필터 적용...")
+    filtered = filter_consecutive_signals(breakouts, min_interval=MIN_INTERVAL_DAYS)
+    print(f"  ✓ 필터 후: {len(filtered)}개")
+
+    # 7. 백테스트
+    print(f"\n7. 백테스트 실행...")
+    trades_df = backtest(df, filtered, tp_pct=TP_PCT, sl_pct=SL_PCT)
+    print(f"  ✓ 완료")
+
+    # 8. 성과 분석
+    analyze_performance(trades_df)
+
+    # 9. 결과 저장
+    if len(trades_df) > 0:
+        trades_df.to_csv('doge_1d_trades.csv', index=False)
+        print(f"\n결과 저장: doge_1d_trades.csv")
+
+if __name__ == '__main__':
+    main()
