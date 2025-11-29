@@ -46,7 +46,7 @@ FIXED_SL_PCT = 10.0   # 10% 손절
 
 # 필터
 MIN_INTERVAL_DAYS = 10  # 최소 10일 간격
-REQUIRE_FVG = True       # FVG 필수 (확실한 자리만!)
+REQUIRE_FVG = False      # FVG 필수 (BTC는 FVG 적음, DOGE/알트코인은 True 권장)
 
 # FVG 설정
 FVG_LOOKBACK = 3  # 3봉으로 FVG 감지
@@ -632,7 +632,12 @@ def main():
 
     try:
         # 방법 1: CSV 파일 (권장)
-        df = load_doge_data_from_csv('doge_sample_data.csv')
+        # DOGE 샘플 데이터
+        # df = load_doge_data_from_csv('doge_sample_data.csv')
+
+        # 실제 BTC 1일봉 데이터로 테스트
+        df = pd.read_csv('btcusdt_1d_raw.csv')
+        df['datetime'] = pd.to_datetime(df['datetime'])
 
         # 방법 2: Binance API
         # df = load_doge_data_from_binance(days=1825)
