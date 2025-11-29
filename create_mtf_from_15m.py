@@ -3,6 +3,8 @@
 - 15분 → 1시간 (4개 합침)
 - 15분 → 4시간 (16개 합침)
 - 15분 → 1일 (96개 합침)
+- 15분 → 3일 (288개 합침)
+- 15분 → 1주 (672개 합침)
 """
 
 import pandas as pd
@@ -58,6 +60,8 @@ timeframes = {
     '1H': ('1시간', 'btcusdt_1h_raw.csv'),
     '4H': ('4시간', 'btcusdt_4h_raw.csv'),
     '1D': ('1일', 'btcusdt_1d_raw.csv'),
+    '3D': ('3일', 'btcusdt_3d_raw.csv'),
+    '1W': ('1주', 'btcusdt_1w_raw.csv'),
 }
 
 results = {}
@@ -76,14 +80,14 @@ print("리샘플링 완료")
 print("=" * 60)
 
 print(f"\n15분 데이터: {len(df_15m):,}개")
-for tf in ['1H', '4H', '1D']:
+for tf in ['1H', '4H', '1D', '3D', '1W']:
     if tf in results:
         print(f"{timeframes[tf][0]}: {len(results[tf]):,}개")
 
 # 이론적 비율 vs 실제
 print(f"\n비율 확인 (15분 기준):")
-expected = {'1H': 4, '4H': 16, '1D': 96}
-for tf in ['1H', '4H', '1D']:
+expected = {'1H': 4, '4H': 16, '1D': 96, '3D': 288, '1W': 672}
+for tf in ['1H', '4H', '1D', '3D', '1W']:
     if tf in results:
         actual = len(df_15m) / len(results[tf])
         exp = expected[tf]
