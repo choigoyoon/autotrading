@@ -33,9 +33,16 @@ MACD_FAST = 12
 MACD_SLOW = 26
 MACD_SIGNAL = 9
 
-# TP/SL (알트코인용 - 변동성 고려)
-TP_PCT = 10.0  # 10%
-SL_PCT = 10.0  # 10%
+# 출구 전략 (추세 추종)
+EXIT_MODE = 'TREND'  # 'TREND' = 추세 끝까지, 'FIXED' = 고정 TP/SL
+
+# 추세 추종 모드 (TREND)
+TRAIL_STOP_PCT = 15.0  # 15% 트레일링 스탑 (고점 대비)
+INITIAL_SL_PCT = 10.0  # 10% 초기 손절
+
+# 고정 TP/SL 모드 (FIXED) - 스윙용
+FIXED_TP_PCT = 50.0   # 50% (큰 수익 목표)
+FIXED_SL_PCT = 10.0   # 10%
 
 # 필터
 MIN_INTERVAL_DAYS = 10  # 최소 10일 간격
@@ -281,11 +288,12 @@ def filter_consecutive_signals(breakouts, min_interval=MIN_INTERVAL_DAYS):
 # 7. 백테스트
 # ═══════════════════════════════════════════════════════════
 
-def backtest(df, breakouts, tp_pct=TP_PCT, sl_pct=SL_PCT):
+def backtest(df, breakouts, mode=EXIT_MODE):
     """
     백테스트 실행
 
-    TP/SL 체크 → 출구 결정
+    mode='TREND': 추세 추종 (트레일링 스탑 + MACD 반전)
+    mode='FIXED': 고정 TP/SL
     """
     trades = []
 
@@ -293,39 +301,16 @@ def backtest(df, breakouts, tp_pct=TP_PCT, sl_pct=SL_PCT):
         break_idx = bp['break_idx']
         entry_price = bp['break_price']
 
-        tp_price = entry_price * (1 + tp_pct / 100)
-        sl_price = entry_price * (1 - sl_pct / 100)
-
-        # 향후 50일 스캔
-        max_idx = min(break_idx + 50, len(df) - 1)
-        future = df.iloc[break_idx:max_idx+1]
-
-        exit_price = None
-        exit_type = None
-        exit_date = None
-
-        for i in range(1, len(future)):
-            candle = future.iloc[i]
-
-            # TP 먼저 체크
-            if candle['high'] >= tp_price:
-                exit_price = tp_price
-                exit_type = 'TP'
-                exit_date = candle['datetime']
-                break
-
-            # SL 체크
-            if candle['low'] <= sl_price:
-                exit_price = sl_price
-                exit_type = 'SL'
-                exit_date = candle['datetime']
-                break
-
-        # 50일 내 TP/SL 미도달 시 시장가 청산
-        if exit_price is None:
-            exit_price = future.iloc[-1]['close']
-            exit_type = 'TIMEOUT'
-            exit_date = future.iloc[-1]['datetime']
+        if mode == 'TREND':
+            # 추세 추종 모드
+            exit_price, exit_type, exit_date = backtest_trend_following(
+                df, break_idx, entry_price
+            )
+        else:
+            # 고정 TP/SL 모드
+            exit_price, exit_type, exit_date = backtest_fixed_tpsl(
+                df, break_idx, entry_price
+            )
 
         pnl = (exit_price - entry_price) / entry_price * 100
 
@@ -340,6 +325,103 @@ def backtest(df, breakouts, tp_pct=TP_PCT, sl_pct=SL_PCT):
         })
 
     return pd.DataFrame(trades)
+
+def backtest_trend_following(df, break_idx, entry_price):
+    """
+    추세 추종 전략
+
+    출구:
+    1. 초기 SL (진입가 대비 -10%)
+    2. 트레일링 스탑 (최고가 대비 -15%)
+    3. MACD 히스토그램 음전환 (추세 종료)
+    """
+    initial_sl = entry_price * (1 - INITIAL_SL_PCT / 100)
+    highest_price = entry_price
+    trailing_stop = initial_sl
+
+    # 향후 200일 스캔 (큰 추세 캡처)
+    max_idx = min(break_idx + 200, len(df) - 1)
+    future = df.iloc[break_idx:max_idx+1]
+
+    exit_price = None
+    exit_type = None
+    exit_date = None
+
+    for i in range(1, len(future)):
+        candle = future.iloc[i]
+
+        # 최고가 갱신
+        if candle['high'] > highest_price:
+            highest_price = candle['high']
+            # 트레일링 스탑 업데이트
+            trailing_stop = highest_price * (1 - TRAIL_STOP_PCT / 100)
+
+        # 1. 트레일링 스탑 도달
+        if candle['low'] <= trailing_stop:
+            exit_price = trailing_stop
+            exit_type = 'TRAIL_STOP'
+            exit_date = candle['datetime']
+            break
+
+        # 2. MACD 반전 (양수 → 음수)
+        if i < len(future) - 1:  # 다음 봉이 있어야 확인 가능
+            curr_hist = candle['macd_hist']
+            next_hist = future.iloc[i+1]['macd_hist']
+
+            if curr_hist >= 0 and next_hist < 0:
+                # 추세 종료! 다음봉 시가에 청산
+                exit_price = future.iloc[i+1]['open']
+                exit_type = 'MACD_REVERSAL'
+                exit_date = future.iloc[i+1]['datetime']
+                break
+
+    # 200일 내 출구 없으면 마지막 종가
+    if exit_price is None:
+        exit_price = future.iloc[-1]['close']
+        exit_type = 'TIMEOUT'
+        exit_date = future.iloc[-1]['datetime']
+
+    return exit_price, exit_type, exit_date
+
+def backtest_fixed_tpsl(df, break_idx, entry_price):
+    """
+    고정 TP/SL 전략 (스윙 트레이딩)
+    """
+    tp_price = entry_price * (1 + FIXED_TP_PCT / 100)
+    sl_price = entry_price * (1 - FIXED_SL_PCT / 100)
+
+    # 향후 100일 스캔
+    max_idx = min(break_idx + 100, len(df) - 1)
+    future = df.iloc[break_idx:max_idx+1]
+
+    exit_price = None
+    exit_type = None
+    exit_date = None
+
+    for i in range(1, len(future)):
+        candle = future.iloc[i]
+
+        # TP 체크
+        if candle['high'] >= tp_price:
+            exit_price = tp_price
+            exit_type = 'TP'
+            exit_date = candle['datetime']
+            break
+
+        # SL 체크
+        if candle['low'] <= sl_price:
+            exit_price = sl_price
+            exit_type = 'SL'
+            exit_date = candle['datetime']
+            break
+
+    # 100일 내 TP/SL 미도달
+    if exit_price is None:
+        exit_price = future.iloc[-1]['close']
+        exit_type = 'TIMEOUT'
+        exit_date = future.iloc[-1]['datetime']
+
+    return exit_price, exit_type, exit_date
 
 # ═══════════════════════════════════════════════════════════
 # 8. 성과 분석
@@ -435,7 +517,16 @@ def main():
 
     print(f"\n전략 설정:")
     print(f"  MACD: ({MACD_FAST}, {MACD_SLOW}, {MACD_SIGNAL})")
-    print(f"  TP/SL: {TP_PCT}% / {SL_PCT}%")
+    print(f"  출구 모드: {EXIT_MODE}")
+
+    if EXIT_MODE == 'TREND':
+        print(f"  - 초기 손절: {INITIAL_SL_PCT}%")
+        print(f"  - 트레일링 스탑: {TRAIL_STOP_PCT}% (최고가 대비)")
+        print(f"  - MACD 반전 시 청산")
+    else:
+        print(f"  - 고정 TP: {FIXED_TP_PCT}%")
+        print(f"  - 고정 SL: {FIXED_SL_PCT}%")
+
     print(f"  최소 간격: {MIN_INTERVAL_DAYS}일")
 
     # 1. 데이터 로드
@@ -484,7 +575,7 @@ def main():
 
     # 7. 백테스트
     print(f"\n7. 백테스트 실행...")
-    trades_df = backtest(df, filtered, tp_pct=TP_PCT, sl_pct=SL_PCT)
+    trades_df = backtest(df, filtered, mode=EXIT_MODE)
     print(f"  ✓ 완료")
 
     # 8. 성과 분석
