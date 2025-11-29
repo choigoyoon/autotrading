@@ -632,10 +632,10 @@ def main():
 
     try:
         # 방법 1: CSV 파일 (권장)
-        # df = load_doge_data_from_csv('doge_1d_data.csv')
+        df = load_doge_data_from_csv('doge_sample_data.csv')
 
         # 방법 2: Binance API
-        df = load_doge_data_from_binance(days=1825)
+        # df = load_doge_data_from_binance(days=1825)
 
         print(f"  ✓ 수집 완료: {len(df)}개 캔들")
         print(f"  ✓ 기간: {df['datetime'].min()} ~ {df['datetime'].max()}")
