@@ -36,13 +36,13 @@ MACD_SIGNAL = 9
 # 출구 전략 (추세 추종)
 EXIT_MODE = 'TREND'  # 'TREND' = 추세 끝까지, 'FIXED' = 고정 TP/SL
 
-# 추세 추종 모드 (TREND)
+# 추세 추종 모드 (TREND) - 권장! ✅
 TRAIL_STOP_PCT = 15.0  # 15% 트레일링 스탑 (고점 대비)
 INITIAL_SL_PCT = 10.0  # 10% 초기 손절
 
-# 고정 TP/SL 모드 (FIXED) - 스윙용
-FIXED_TP_PCT = 50.0   # 50% (큰 수익 목표)
-FIXED_SL_PCT = 10.0   # 10%
+# 고정 TP/SL 모드 (FIXED) - 알트코인에는 부적합 ❌
+FIXED_TP_PCT = 10.0   # 10% 익절 (대박 놓침)
+FIXED_SL_PCT = 10.0   # 10% 손절
 
 # 필터
 MIN_INTERVAL_DAYS = 10  # 최소 10일 간격
