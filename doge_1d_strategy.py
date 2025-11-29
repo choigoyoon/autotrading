@@ -46,6 +46,10 @@ FIXED_SL_PCT = 10.0   # 10%
 
 # 필터
 MIN_INTERVAL_DAYS = 10  # 최소 10일 간격
+REQUIRE_FVG = True       # FVG 필수 (확실한 자리만!)
+
+# FVG 설정
+FVG_LOOKBACK = 3  # 3봉으로 FVG 감지
 
 # 수수료
 FEE_TOTAL = 0.11  # 0.11%
@@ -265,22 +269,67 @@ def detect_breakouts(df, trendlines):
     return breakouts
 
 # ═══════════════════════════════════════════════════════════
-# 6. 간격 필터
+# 6. FVG (Fair Value Gap) 감지
 # ═══════════════════════════════════════════════════════════
 
-def filter_consecutive_signals(breakouts, min_interval=MIN_INTERVAL_DAYS):
+def detect_fvg(df, idx):
     """
-    연속 신호 필터링
+    FVG (Fair Value Gap) 감지
 
-    최소 N일 간격 유지
+    Bullish FVG:
+    candle[i-2].high < candle[i].low
+    → 중간에 갭 존재 = 강한 상승 압력
     """
+    if idx < 2:
+        return False
+
+    candle_now = df.iloc[idx]
+    candle_2ago = df.iloc[idx - 2]
+
+    # Bullish FVG (롱 진입용)
+    if candle_2ago['high'] < candle_now['low']:
+        return True
+
+    return False
+
+def add_fvg_flags(df, breakouts):
+    """
+    각 돌파 신호에 FVG 여부 추가
+    """
+    for bp in breakouts:
+        break_idx = bp['break_idx']
+        bp['has_fvg'] = detect_fvg(df, break_idx)
+
+    return breakouts
+
+# ═══════════════════════════════════════════════════════════
+# 7. 간격 필터 + FVG 필터
+# ═══════════════════════════════════════════════════════════
+
+def filter_signals(breakouts, df, min_interval=MIN_INTERVAL_DAYS, require_fvg=REQUIRE_FVG):
+    """
+    신호 필터링
+
+    1. 최소 N일 간격 유지
+    2. FVG 필수 (옵션)
+    """
+    # FVG 플래그 추가
+    breakouts = add_fvg_flags(df, breakouts)
+
     filtered = []
     last_idx = -999
 
     for bp in breakouts:
-        if bp['break_idx'] - last_idx >= min_interval:
-            filtered.append(bp)
-            last_idx = bp['break_idx']
+        # 간격 체크
+        if bp['break_idx'] - last_idx < min_interval:
+            continue
+
+        # FVG 체크 (필수인 경우)
+        if require_fvg and not bp['has_fvg']:
+            continue
+
+        filtered.append(bp)
+        last_idx = bp['break_idx']
 
     return filtered
 
@@ -494,6 +543,31 @@ def analyze_performance(trades_df):
 
     print(f"  최종 잔고: ${balance:,.2f} (초기 $1,000)")
 
+    # $100 투기 시나리오
+    balance_100 = 100
+    for pnl in trades_df['pnl_after_fee']:
+        balance_100 *= (1 + pnl / 100)
+
+    profit_100 = balance_100 - 100
+
+    print(f"\n💰 투기 시나리오 ($100):")
+    print(f"  초기: $100")
+    print(f"  최종: ${balance_100:,.2f}")
+    print(f"  수익: ${profit_100:+.2f}")
+
+    # 레버리지 3배
+    balance_100_lev = 100
+    for pnl in trades_df['pnl_after_fee']:
+        lev_pnl = pnl * 3  # 3배 레버
+        balance_100_lev *= (1 + lev_pnl / 100)
+
+    profit_100_lev = balance_100_lev - 100
+
+    print(f"\n💰 투기 + 레버리지 3배 ($100):")
+    print(f"  초기: $100")
+    print(f"  최종: ${balance_100_lev:,.2f}")
+    print(f"  수익: ${profit_100_lev:+.2f}")
+
     # MDD
     cumulative = (1 + trades_df['pnl_after_fee'] / 100).cumprod()
     peak = cumulative.expanding(min_periods=1).max()
@@ -501,6 +575,21 @@ def analyze_performance(trades_df):
     mdd = drawdown.min()
 
     print(f"\nMDD: {mdd:.2f}%")
+
+    # 최대/최소 수익 거래
+    if len(trades_df) > 0:
+        best_trade = trades_df.loc[trades_df['pnl_after_fee'].idxmax()]
+        worst_trade = trades_df.loc[trades_df['pnl_after_fee'].idxmin()]
+
+        print(f"\n최고 수익 거래:")
+        print(f"  날짜: {best_trade['entry_date']}")
+        print(f"  수익: {best_trade['pnl_after_fee']:.2f}%")
+        print(f"  출구: {best_trade['exit_type']}")
+
+        print(f"\n최악 손실 거래:")
+        print(f"  날짜: {worst_trade['entry_date']}")
+        print(f"  손실: {worst_trade['pnl_after_fee']:.2f}%")
+        print(f"  출구: {worst_trade['exit_type']}")
 
     print("\n" + "=" * 70)
 
@@ -516,18 +605,27 @@ def main():
     print("=" * 70)
 
     print(f"\n전략 설정:")
+    print(f"  타입: 투기 전략 (확실한 자리만!)")
     print(f"  MACD: ({MACD_FAST}, {MACD_SLOW}, {MACD_SIGNAL})")
-    print(f"  출구 모드: {EXIT_MODE}")
+    print(f"\n진입 조건:")
+    print(f"  1. 추세선 상향 돌파 (H값 연결)")
+    print(f"  2. FVG 발생 필수: {'예' if REQUIRE_FVG else '아니오'}")
+    print(f"  3. 최소 간격: {MIN_INTERVAL_DAYS}일")
 
+    print(f"\n출구 전략: {EXIT_MODE}")
     if EXIT_MODE == 'TREND':
         print(f"  - 초기 손절: {INITIAL_SL_PCT}%")
         print(f"  - 트레일링 스탑: {TRAIL_STOP_PCT}% (최고가 대비)")
         print(f"  - MACD 반전 시 청산")
+        print(f"  → 추세 끝까지 타기!")
     else:
         print(f"  - 고정 TP: {FIXED_TP_PCT}%")
         print(f"  - 고정 SL: {FIXED_SL_PCT}%")
 
-    print(f"  최소 간격: {MIN_INTERVAL_DAYS}일")
+    print(f"\n권장 포지션:")
+    print(f"  투기 자금: $100")
+    print(f"  레버리지: 3-5배 (선택)")
+    print(f"  리스크: 전액 손실 가능 (투기)")
 
     # 1. 데이터 로드
     print(f"\n1. 데이터 로드...")
@@ -568,10 +666,16 @@ def main():
     breakouts = detect_breakouts(df, trendlines)
     print(f"  ✓ 돌파 신호: {len(breakouts)}개")
 
-    # 6. 간격 필터
-    print(f"\n6. 간격 필터 적용...")
-    filtered = filter_consecutive_signals(breakouts, min_interval=MIN_INTERVAL_DAYS)
+    # 6. 필터 적용 (간격 + FVG)
+    print(f"\n6. 필터 적용...")
+    print(f"  - 최소 간격: {MIN_INTERVAL_DAYS}일")
+    print(f"  - FVG 필수: {'예' if REQUIRE_FVG else '아니오'}")
+    filtered = filter_signals(breakouts, df, min_interval=MIN_INTERVAL_DAYS, require_fvg=REQUIRE_FVG)
     print(f"  ✓ 필터 후: {len(filtered)}개")
+
+    if REQUIRE_FVG and len(filtered) > 0:
+        fvg_count = sum(1 for bp in filtered if bp.get('has_fvg', False))
+        print(f"  ✓ FVG 있는 신호: {fvg_count}개")
 
     # 7. 백테스트
     print(f"\n7. 백테스트 실행...")
