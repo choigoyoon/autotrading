@@ -1,0 +1,389 @@
+import pandas as pd
+import numpy as np
+
+# 데이터 로드
+candles_df = pd.read_csv('btc_15m_ohlcv.csv')
+
+# 타임스탬프 변환
+candles_df['datetime'] = pd.to_datetime(candles_df['datetime'])
+
+print("="*100)
+print("변곡점 캔들 진입 백테스트 + MTF 추세 필터")
+print("="*100)
+
+# === MTF 이동평균 계산 (실시간 가능) ===
+print("\nMTF 이동평균 계산 중...")
+
+# 1시간 = 4개 15분봉
+candles_df['ma_1h'] = candles_df['close'].rolling(window=4).mean()
+
+# 4시간 = 16개 15분봉
+candles_df['ma_4h'] = candles_df['close'].rolling(window=16).mean()
+
+# 추세 강도 (현재가 - MA) / MA * 100
+candles_df['trend_1h'] = ((candles_df['close'] - candles_df['ma_1h']) / candles_df['ma_1h']) * 100
+candles_df['trend_4h'] = ((candles_df['close'] - candles_df['ma_4h']) / candles_df['ma_4h']) * 100
+
+print("✅ MTF 지표 계산 완료\n")
+
+# 실시간 시뮬레이션: 캔들 하나씩 처리
+trades = []
+position = None
+
+# 상태 변수
+recent_lows = []  # 최근 저점들 (가격, 시간)
+last_L = None
+current_hl_detected = False
+searching_inflection = False
+hl_event = None
+
+# 필터링 통계
+mtf_filter_count = 0
+total_inflection_candidates = 0
+
+print("\n실시간 시뮬레이션 시작 (MTF 필터 적용)...")
+print("(각 캔들을 순차적으로 처리, 미래 데이터 사용 안 함)\n")
+
+for i in range(100, len(candles_df)):  # 첫 100개는 초기화용
+    candle = candles_df.iloc[i]
+    
+    # 이전 20개 캔들
+    prev_candles = candles_df.iloc[max(0, i-20):i]
+    
+    # === Step 1: 저점(L) 감지 (실시간으로 가능) ===
+    # 현재 캔들이 지역 저점인지 확인 (이전/이후 N개 캔들보다 낮음)
+    # 하지만 "이후" 캔들은 미래 데이터이므로, 다음 방법 사용:
+    # "현재가 저점 후보 → 다음 캔들들이 올라가면 저점 확정"
+    
+    # 최근 N개 캔들 중 최저가
+    if len(prev_candles) >= 10:
+        recent_low = prev_candles['low'].tail(10).min()
+        
+        # 현재 캔들이 최저점 근처라면 저점 후보
+        if candle['low'] <= recent_low * 1.002:  # 0.2% 오차 허용
+            recent_lows.append({
+                'price': candle['low'],
+                'time': candle['datetime'],
+                'index': i
+            })
+            
+            # 너무 많이 쌓이면 오래된 것 제거
+            if len(recent_lows) > 5:
+                recent_lows.pop(0)
+    
+    # === Step 2: HL (Higher Low) 감지 ===
+    # 최근 저점이 이전 저점보다 높으면 HL
+    if len(recent_lows) >= 2 and not searching_inflection:
+        current_low = recent_lows[-1]['price']
+        previous_low = recent_lows[-2]['price']
+        
+        # HL 조건: 현재 저점 > 이전 저점, 그리고 이후 반등 확인
+        if current_low > previous_low:
+            # 반등 확인: 현재 캔들이 최저점보다 0.3% 이상 위
+            if candle['close'] > current_low * 1.003:
+                # HL 확정!
+                hl_strength = ((current_low - previous_low) / previous_low) * 100
+                
+                if hl_strength >= 0.5:  # 최소 강도
+                    hl_event = {
+                        'hl_time': recent_lows[-1]['time'],
+                        'hl_price': current_low,
+                        'hl_strength': hl_strength,
+                        'hl_index': recent_lows[-1]['index']
+                    }
+                    
+                    searching_inflection = True
+                    current_hl_detected = True
+    
+    # === Step 3: 포지션 있으면 청산 체크 ===
+    if position is not None:
+        # SL 체크
+        if candle['low'] <= position['sl_price']:
+            exit_price = position['sl_price']
+            pnl_pct = ((exit_price - position['entry_price']) / position['entry_price']) * 100
+            
+            trades.append({
+                'hl_time': position['hl_time'],
+                'hl_price': position['hl_price'],
+                'hl_strength': position['hl_strength'],
+                'entry_time': position['entry_time'],
+                'entry_price': position['entry_price'],
+                'exit_time': candle['datetime'],
+                'exit_price': exit_price,
+                'exit_reason': 'SL',
+                'pnl_pct': pnl_pct,
+                'hold_hours': (candle['datetime'] - position['entry_time']).total_seconds() / 3600,
+                'trend_1h': position['trend_1h'],
+                'trend_4h': position['trend_4h']
+            })
+            position = None
+            searching_inflection = False
+            continue
+        
+        # TP2 체크
+        if candle['high'] >= position['tp2_price']:
+            exit_price = position['tp2_price']
+            pnl_pct = ((exit_price - position['entry_price']) / position['entry_price']) * 100
+            
+            trades.append({
+                'hl_time': position['hl_time'],
+                'hl_price': position['hl_price'],
+                'hl_strength': position['hl_strength'],
+                'entry_time': position['entry_time'],
+                'entry_price': position['entry_price'],
+                'exit_time': candle['datetime'],
+                'exit_price': exit_price,
+                'exit_reason': 'TP2_Full',
+                'pnl_pct': pnl_pct,
+                'hold_hours': (candle['datetime'] - position['entry_time']).total_seconds() / 3600,
+                'trend_1h': position['trend_1h'],
+                'trend_4h': position['trend_4h']
+            })
+            position = None
+            searching_inflection = False
+            continue
+        
+        # TP1 체크
+        if candle['high'] >= position['tp1_price']:
+            exit_price = position['tp1_price']
+            pnl_pct = ((exit_price - position['entry_price']) / position['entry_price']) * 100
+            
+            trades.append({
+                'hl_time': position['hl_time'],
+                'hl_price': position['hl_price'],
+                'hl_strength': position['hl_strength'],
+                'entry_time': position['entry_time'],
+                'entry_price': position['entry_price'],
+                'exit_time': candle['datetime'],
+                'exit_price': exit_price,
+                'exit_reason': 'TP1_Partial',
+                'pnl_pct': pnl_pct,
+                'hold_hours': (candle['datetime'] - position['entry_time']).total_seconds() / 3600,
+                'trend_1h': position['trend_1h'],
+                'trend_4h': position['trend_4h']
+            })
+            position = None
+            searching_inflection = False
+            continue
+    
+    # === Step 4: 변곡점 캔들 찾기 (포지션 없고, HL 감지됨) ===
+    if position is None and searching_inflection and hl_event is not None:
+        # HL 이후 20개 캔들까지만 탐색
+        if i - hl_event['hl_index'] > 20:
+            searching_inflection = False
+            hl_event = None
+            continue
+        
+        # 변곡점 캔들 조건 체크
+        # 1. 양봉
+        if candle['close'] <= candle['open']:
+            continue
+        
+        # 2. 바디 크기
+        body_size = candle['close'] - candle['open']
+        body_pct = (body_size / candle['open']) * 100
+        
+        if body_pct < 0.3:
+            continue
+        
+        # 3. 바디/전체 비율
+        total_range = candle['high'] - candle['low']
+        if total_range == 0:
+            continue
+        
+        body_to_range = (body_size / total_range) * 100
+        
+        if body_to_range < 60:
+            continue
+        
+        # 4. 거래량 (이전 5개 평균 대비)
+        if i >= 5:
+            prev_volume_avg = candles_df.iloc[i-5:i]['volume'].mean()
+            volume_ratio = candle['volume'] / prev_volume_avg if prev_volume_avg > 0 else 1
+            
+            if volume_ratio < 1.0:
+                continue
+        
+        # ⭐ 변곡점 캔들 후보 발견!
+        total_inflection_candidates += 1
+        
+        # === NEW: MTF 추세 필터 적용 ===
+        trend_1h = candles_df.iloc[i]['trend_1h']
+        trend_4h = candles_df.iloc[i]['trend_4h']
+        
+        # MTF 필터 조건
+        mtf_passed = True
+        
+        # 1시간 추세가 상승이어야 함
+        if pd.notna(trend_1h) and trend_1h <= 0:
+            mtf_passed = False
+        
+        # 4시간 추세가 상승이어야 함
+        if pd.notna(trend_4h) and trend_4h <= 0:
+            mtf_passed = False
+        
+        # 4시간 추세 강도가 0.5% 이상이어야 함
+        if pd.notna(trend_4h) and abs(trend_4h) < 0.5:
+            mtf_passed = False
+        
+        if not mtf_passed:
+            mtf_filter_count += 1
+            continue
+        
+        # 🎯 MTF 필터 통과! 진입!
+        entry_price = candle['close']
+        
+        # TP/SL 설정
+        hl_strength = hl_event['hl_strength']
+        if hl_strength >= 5:
+            tp1_pct, tp2_pct = 2.0, 4.0
+        elif hl_strength >= 2:
+            tp1_pct, tp2_pct = 1.5, 3.0
+        elif hl_strength >= 1:
+            tp1_pct, tp2_pct = 1.0, 2.0
+        else:
+            tp1_pct, tp2_pct = 0.7, 1.5
+        
+        tp1_price = entry_price * (1 + tp1_pct / 100)
+        tp2_price = entry_price * (1 + tp2_pct / 100)
+        sl_price = hl_event['hl_price'] * 0.99
+        
+        position = {
+            'hl_time': hl_event['hl_time'],
+            'hl_price': hl_event['hl_price'],
+            'hl_strength': hl_strength,
+            'entry_time': candle['datetime'],
+            'entry_price': entry_price,
+            'tp1_price': tp1_price,
+            'tp2_price': tp2_price,
+            'sl_price': sl_price,
+            'trend_1h': trend_1h,
+            'trend_4h': trend_4h
+        }
+        
+        searching_inflection = False
+
+print(f"백테스트 완료!\n")
+
+# 결과 분석
+trades_df = pd.DataFrame(trades)
+
+print(f"\n📊 MTF 필터링 통계:")
+print(f"  변곡점 캔들 후보: {total_inflection_candidates}개")
+print(f"  MTF 필터 차단: {mtf_filter_count}개 ({mtf_filter_count/total_inflection_candidates*100 if total_inflection_candidates > 0 else 0:.1f}%)")
+print(f"  최종 진입: {len(trades_df)}개 ({len(trades_df)/total_inflection_candidates*100 if total_inflection_candidates > 0 else 0:.1f}%)")
+
+if len(trades_df) == 0:
+    print("\n⚠️ 거래가 없습니다.")
+else:
+    print(f"\n총 거래: {len(trades_df)}건")
+    
+    # 승률 계산
+    tp_trades = trades_df[trades_df['exit_reason'].str.contains('TP')]
+    sl_trades = trades_df[trades_df['exit_reason'] == 'SL']
+    
+    win_rate = len(tp_trades) / len(trades_df) * 100
+    
+    # PNL 계산
+    total_pnl = trades_df['pnl_pct'].sum()
+    avg_pnl = trades_df['pnl_pct'].mean()
+    
+    # 청산 사유별 통계
+    print("\n" + "="*100)
+    print("청산 사유별 통계")
+    print("="*100)
+    
+    for reason in trades_df['exit_reason'].unique():
+        reason_trades = trades_df[trades_df['exit_reason'] == reason]
+        print(f"\n{reason}:")
+        print(f"  거래 수: {len(reason_trades)} ({len(reason_trades)/len(trades_df)*100:.1f}%)")
+        print(f"  평균 PNL: {reason_trades['pnl_pct'].mean():.2f}%")
+        print(f"  총 PNL: {reason_trades['pnl_pct'].sum():.2f}%")
+    
+    # 전체 통계
+    print("\n" + "="*100)
+    print("전체 백테스트 결과 (MTF 필터 적용)")
+    print("="*100)
+    
+    print(f"\n📊 기본 통계:")
+    print(f"  총 거래: {len(trades_df)}건")
+    print(f"  승률: {win_rate:.2f}%")
+    print(f"  SL 비율: {len(sl_trades)/len(trades_df)*100:.1f}%")
+    
+    print(f"\n💰 수익성:")
+    print(f"  총 PNL: {total_pnl:.2f}%")
+    print(f"  평균 PNL: {avg_pnl:.2f}%")
+    print(f"  최대 이익: {trades_df['pnl_pct'].max():.2f}%")
+    print(f"  최대 손실: {trades_df['pnl_pct'].min():.2f}%")
+    
+    print(f"\n⏱️ 시간:")
+    print(f"  평균 보유: {trades_df['hold_hours'].mean():.2f}시간")
+    
+    # 연도별 통계
+    trades_df['year'] = trades_df['entry_time'].dt.year
+    
+    print("\n" + "="*100)
+    print("연도별 성과")
+    print("="*100)
+    
+    for year in sorted(trades_df['year'].unique()):
+        year_trades = trades_df[trades_df['year'] == year]
+        year_win_rate = len(year_trades[year_trades['exit_reason'].str.contains('TP')]) / len(year_trades) * 100
+        
+        print(f"\n{year}년:")
+        print(f"  거래 수: {len(year_trades)}건")
+        print(f"  총 PNL: {year_trades['pnl_pct'].sum():.2f}%")
+        print(f"  평균 PNL: {year_trades['pnl_pct'].mean():.2f}%")
+        print(f"  승률: {year_win_rate:.1f}%")
+    
+    # MTF 추세 분석
+    print("\n" + "="*100)
+    print("MTF 추세별 성과")
+    print("="*100)
+    
+    print(f"\n1시간 추세:")
+    print(f"  평균: {trades_df['trend_1h'].mean():.2f}%")
+    print(f"  범위: {trades_df['trend_1h'].min():.2f}% ~ {trades_df['trend_1h'].max():.2f}%")
+    
+    print(f"\n4시간 추세:")
+    print(f"  평균: {trades_df['trend_4h'].mean():.2f}%")
+    print(f"  범위: {trades_df['trend_4h'].min():.2f}% ~ {trades_df['trend_4h'].max():.2f}%")
+    
+    # 저장
+    trades_df.to_csv('backtest_inflection_mtf_filtered_results.csv', index=False)
+    print(f"\n✅ 결과 저장: backtest_inflection_mtf_filtered_results.csv")
+    
+    # 기존 전략과 비교
+    print("\n" + "="*100)
+    print("📊 전략 비교")
+    print("="*100)
+    
+    # 기존 결과 로드
+    try:
+        old_df = pd.read_csv('backtest_inflection_no_lookahead_results.csv')
+        old_pnl = old_df['pnl_pct'].sum()
+        old_win_rate = len(old_df[old_df['exit_reason'].str.contains('TP')]) / len(old_df) * 100
+        old_sl_rate = len(old_df[old_df['exit_reason'] == 'SL']) / len(old_df) * 100
+        old_avg_pnl = old_df['pnl_pct'].mean()
+        old_trades = len(old_df)
+        
+        print(f"\n기존 전략 (MTF 필터 없음):")
+        print(f"  총 거래: {old_trades}건")
+        print(f"  총 PNL: {old_pnl:.2f}%")
+        print(f"  평균 PNL: {old_avg_pnl:.2f}%")
+        print(f"  승률: {old_win_rate:.2f}%")
+        print(f"  SL 비율: {old_sl_rate:.1f}%")
+        
+        print(f"\n신규 전략 (MTF 필터 적용):")
+        print(f"  총 거래: {len(trades_df)}건 ({len(trades_df) - old_trades:+d})")
+        print(f"  총 PNL: {total_pnl:.2f}% ({total_pnl - old_pnl:+.2f}%p)")
+        print(f"  평균 PNL: {avg_pnl:.2f}% ({avg_pnl - old_avg_pnl:+.2f}%p)")
+        print(f"  승률: {win_rate:.2f}% ({win_rate - old_win_rate:+.2f}%p)")
+        print(f"  SL 비율: {len(sl_trades)/len(trades_df)*100:.1f}% ({len(sl_trades)/len(trades_df)*100 - old_sl_rate:+.1f}%p)")
+        
+        # 개선율
+        pnl_improvement = ((total_pnl / old_pnl) - 1) * 100 if old_pnl != 0 else 0
+        print(f"\n✅ 총 PNL 개선율: {pnl_improvement:+.1f}%")
+        
+    except FileNotFoundError:
+        print("\n⚠️ 기존 결과 파일을 찾을 수 없습니다.")
