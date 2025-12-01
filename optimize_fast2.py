@@ -8,74 +8,68 @@ df_4h = pd.read_csv('btc_4h_ohlcv.csv')
 df_15m['datetime'] = pd.to_datetime(df_15m['datetime'])
 df_4h['datetime'] = pd.to_datetime(df_4h['datetime'])
 
-# 인덱스 설정으로 검색 최적화
-df_15m = df_15m.set_index('datetime').sort_index()
+# 4H FVG 감지
+def detect_fvgs(df):
+    fvgs = []
+    for i in range(2, len(df)):
+        prev2 = df.iloc[i-2]
+        curr = df.iloc[i]
+        
+        if prev2['high'] < curr['low']:
+            fvgs.append({
+                'datetime': curr['datetime'],
+                'fvg_top': curr['low'],
+                'fvg_bottom': prev2['high'],
+                'body_size': abs(curr['close'] - curr['open']) / curr['open'] * 100
+            })
+    return pd.DataFrame(fvgs)
 
-# 4H FVG 감지 (벡터화)
-def detect_4h_fvg_fast(df):
-    df = df.copy()
-    df['prev2_high'] = df['high'].shift(2)
-    df['body_size'] = abs(df['close'] - df['open']) / df['open'] * 100
-    
-    # 상승 FVG 조건
-    mask = df['prev2_high'] < df['low']
-    fvg_df = df[mask].copy()
-    fvg_df['fvg_top'] = fvg_df['low']
-    fvg_df['fvg_bottom'] = fvg_df['prev2_high']
-    fvg_df['fvg_size'] = (fvg_df['fvg_top'] - fvg_df['fvg_bottom']) / fvg_df['fvg_bottom'] * 100
-    
-    return fvg_df[['fvg_top', 'fvg_bottom', 'fvg_size', 'body_size']].reset_index()
+fvg_df = detect_fvgs(df_4h)
+print(f"감지된 4H FVG: {len(fvg_df)}개")
 
-fvg_df = detect_4h_fvg_fast(df_4h)
-print(f"감지된 4H FVG: {len(fvg_df)}개\n")
+# 15분 데이터 numpy 변환 (속도 최적화)
+times_15m = df_15m['datetime'].values
+lows_15m = df_15m['low'].values
+highs_15m = df_15m['high'].values
+opens_15m = df_15m['open'].values
 
-# 빠른 시뮬레이션
-def simulate_fast(fvg_df, df_15m, tp_pct, sl_pct, min_body=0):
+def simulate(fvg_df, tp_pct, sl_pct, min_body=0):
     trades = []
-    
     filtered = fvg_df[fvg_df['body_size'] >= min_body] if min_body > 0 else fvg_df
     
     for _, fvg in filtered.iterrows():
         fvg_time = fvg['datetime']
         fvg_top = fvg['fvg_top']
         
-        try:
-            future = df_15m.loc[fvg_time:].iloc[1:201]
-        except:
+        # FVG 이후 15분봉 찾기
+        start_idx = np.searchsorted(times_15m, fvg_time)
+        if start_idx >= len(times_15m) - 200:
             continue
         
-        if len(future) < 10:
+        # FVG 터치 찾기 (200봉 내)
+        entry_idx = None
+        for i in range(start_idx + 1, min(start_idx + 200, len(times_15m))):
+            if lows_15m[i] <= fvg_top:
+                if i + 1 < len(times_15m):
+                    entry_idx = i + 1
+                break
+        
+        if entry_idx is None:
             continue
         
-        # FVG 터치 찾기
-        touch_mask = future['low'] <= fvg_top
-        if not touch_mask.any():
-            continue
-        
-        touch_idx = touch_mask.idxmax()
-        touch_pos = future.index.get_loc(touch_idx)
-        
-        if touch_pos + 1 >= len(future):
-            continue
-        
-        entry_row = future.iloc[touch_pos + 1]
-        entry_price = entry_row['open']
-        entry_time = future.index[touch_pos + 1]
+        entry_price = opens_15m[entry_idx]
+        entry_time = times_15m[entry_idx]
         
         tp_price = entry_price * (1 + tp_pct / 100)
         sl_price = entry_price * (1 + sl_pct / 100)
         
         # 결과 판정
-        after = future.iloc[touch_pos + 2:]
-        if len(after) == 0:
-            continue
-        
         result = None
-        for idx, row in after.iterrows():
-            if row['low'] <= sl_price:
+        for i in range(entry_idx + 1, min(entry_idx + 200, len(times_15m))):
+            if lows_15m[i] <= sl_price:
                 result = 'loss'
                 break
-            if row['high'] >= tp_price:
+            if highs_15m[i] >= tp_price:
                 result = 'win'
                 break
         
@@ -89,22 +83,19 @@ def simulate_fast(fvg_df, df_15m, tp_pct, sl_pct, min_body=0):
     return trades
 
 def calc_stats(trades):
-    if not trades:
+    if len(trades) < 5:
         return None
     
     wins = sum(1 for t in trades if t['result'] == 'win')
     wr = wins / len(trades) * 100
+    total_pnl = sum(t['pnl'] for t in trades)
     
     # MDD
-    cum = 0
-    peak = 0
-    mdd = 0
+    cum, peak, mdd = 0, 0, 0
     for t in trades:
         cum += t['pnl']
         peak = max(peak, cum)
         mdd = min(mdd, cum - peak)
-    
-    total_pnl = sum(t['pnl'] for t in trades)
     
     # 월별
     df = pd.DataFrame(trades)
@@ -118,19 +109,20 @@ def calc_stats(trades):
         'mdd': mdd,
         'efficiency': total_pnl / abs(mdd) if mdd != 0 else 0,
         'monthly_avg': monthly.mean(),
-        'monthly_trades': len(trades) / len(monthly) if len(monthly) > 0 else 0
+        'months': len(monthly)
     }
 
-print("=" * 70)
+print("\n" + "=" * 70)
 print("🔍 MDD 줄이고 수익 늘리기 - 최적화 분석")
 print("=" * 70)
 
 # 현재 전략
 print("\n[현재 전략] TP 1.0% / SL -1.5%")
-base = calc_stats(simulate_fast(fvg_df, df_15m, 1.0, -1.5))
+base = calc_stats(simulate(fvg_df, 1.0, -1.5))
 if base:
-    print(f"  거래: {base['trades']}회, 승률: {base['wr']:.1f}%, 총PnL: {base['total_pnl']:.1f}%")
-    print(f"  MDD: {base['mdd']:.1f}%, 효율: {base['efficiency']:.1f}, 월평균: {base['monthly_avg']:.2f}%")
+    print(f"  거래: {base['trades']}회 ({base['months']}개월), 승률: {base['wr']:.1f}%")
+    print(f"  총 PnL: {base['total_pnl']:.1f}%, MDD: {base['mdd']:.1f}%")
+    print(f"  효율(PnL/MDD): {base['efficiency']:.1f}, 월평균: {base['monthly_avg']:.2f}%")
 
 # 방법 1: TP/SL 조정
 print("\n" + "=" * 70)
@@ -142,7 +134,7 @@ print("-" * 60)
 results1 = []
 for tp in [1.0, 1.5, 2.0, 2.5, 3.0]:
     for sl in [-0.5, -1.0, -1.5, -2.0]:
-        s = calc_stats(simulate_fast(fvg_df, df_15m, tp, sl))
+        s = calc_stats(simulate(fvg_df, tp, sl))
         if s and s['trades'] > 50:
             results1.append({'tp': tp, 'sl': sl, **s})
 
@@ -158,25 +150,25 @@ print(f"\n{'몸통':>6} {'거래':>5} {'승률':>6} {'총PnL':>7} {'MDD':>6} {'�
 print("-" * 60)
 
 for body in [0, 1.0, 1.5, 2.0, 2.5, 3.0]:
-    s = calc_stats(simulate_fast(fvg_df, df_15m, 1.0, -1.5, body))
-    if s and s['trades'] > 15:
+    s = calc_stats(simulate(fvg_df, 1.0, -1.5, body))
+    if s and s['trades'] > 10:
         print(f"{body:>5.1f}% {s['trades']:>5} {s['wr']:>5.1f}% {s['total_pnl']:>6.1f}% {s['mdd']:>5.1f}% {s['efficiency']:>6.1f} {s['monthly_avg']:>6.2f}%")
 
-# 방법 3: 복합 조건
+# 방법 3: 복합 조건 (효율 최적화)
 print("\n" + "=" * 70)
-print("📊 방법 3: 복합 최적화 (몸통 + TP/SL)")
+print("📊 방법 3: 복합 최적화 (몸통 + TP/SL) - 효율 순")
 print("=" * 70)
 print(f"\n{'조건':>25} {'거래':>5} {'승률':>6} {'총PnL':>7} {'MDD':>6} {'효율':>6} {'월평균':>7}")
 print("-" * 80)
 
 best = []
-for body in [1.0, 1.5, 2.0]:
+for body in [1.0, 1.5, 2.0, 2.5]:
     for tp in [1.5, 2.0, 2.5, 3.0]:
         for sl in [-1.0, -1.5, -2.0]:
-            s = calc_stats(simulate_fast(fvg_df, df_15m, tp, sl, body))
-            if s and s['trades'] > 15:
+            s = calc_stats(simulate(fvg_df, tp, sl, body))
+            if s and s['trades'] > 10:
                 label = f"몸통{body}%+ TP{tp}% SL{sl}%"
-                best.append({'label': label, **s})
+                best.append({'label': label, 'body': body, 'tp': tp, 'sl': sl, **s})
 
 best.sort(key=lambda x: x['efficiency'], reverse=True)
 for r in best[:10]:
@@ -197,5 +189,9 @@ if best and base:
     print(f"{'MDD':<15} {base['mdd']:>11.1f}% {top['mdd']:>11.1f}% {top['mdd']-base['mdd']:>+9.1f}%")
     print(f"{'효율(PnL/MDD)':<15} {base['efficiency']:>12.1f} {top['efficiency']:>12.1f} {top['efficiency']-base['efficiency']:>+10.1f}")
     print(f"{'월평균 수익':<15} {base['monthly_avg']:>11.2f}% {top['monthly_avg']:>11.2f}% {top['monthly_avg']-base['monthly_avg']:>+9.2f}%")
+    
     print(f"\n🎯 최적 전략: {top['label']}")
+    print(f"   - 조건: 4H 몸통 {top['body']}% 이상")
+    print(f"   - TP: {top['tp']}%, SL: {top['sl']}%")
+    print(f"   - 월 거래: {top['trades']/top['months']:.1f}회")
 
