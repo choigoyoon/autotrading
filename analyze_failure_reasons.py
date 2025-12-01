@@ -1,423 +1,228 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Floor Catch Strategy - 실패 이유 분석
-왜 상승이 없는지 상세 분석
-"""
-
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
 
+print("=" * 80)
+print("🔍 확정 공간 백테스트 실패 사유 상세 분석")
+print("=" * 80)
+print()
 
-def load_data():
-    """데이터 로드"""
-    df = pd.read_csv('btc_15m_ohlcv.csv')
-    df['datetime'] = pd.to_datetime(df['datetime'])
-    
-    trades = pd.read_csv('floor_catch_strategy_results.csv')
-    trades['entry_time'] = pd.to_datetime(trades['entry_time'])
-    trades['exit_time'] = pd.to_datetime(trades['exit_time'])
-    
-    return df, trades
+# Load backtest results
+df_trades = pd.read_csv('backtest_confirmation_space_results.csv')
+df_trades['entry_time'] = pd.to_datetime(df_trades['entry_time'])
+df_trades['exit_time'] = pd.to_datetime(df_trades['exit_time'])
 
+print(f"총 거래: {len(df_trades)}개")
+print()
 
-def calculate_indicators(df):
-    """지표 계산"""
-    # RSI
-    delta = df['close'].diff()
-    gain = delta.where(delta > 0, 0).rolling(window=14).mean()
-    loss = -delta.where(delta < 0, 0).rolling(window=14).mean()
-    rs = gain / loss
-    df['rsi'] = 100 - (100 / (1 + rs))
-    
-    # MACD
-    exp1 = df['close'].ewm(span=12, adjust=False).mean()
-    exp2 = df['close'].ewm(span=26, adjust=False).mean()
-    macd = exp1 - exp2
-    signal = macd.ewm(span=9, adjust=False).mean()
-    df['macd_hist'] = macd - signal
-    
-    # Bollinger Bands
-    df['ma20'] = df['close'].rolling(window=20).mean()
-    df['bb_std'] = df['close'].rolling(window=20).std()
-    df['bb_upper'] = df['ma20'] + (df['bb_std'] * 2)
-    df['bb_lower'] = df['ma20'] - (df['bb_std'] * 2)
-    
-    # Volume
-    df['volume_ma20'] = df['volume'].rolling(window=20).mean()
-    df['volume_ratio'] = df['volume'] / df['volume_ma20']
-    
-    return df
+# Separate by result
+sl_trades = df_trades[df_trades['exit_reason'] == 'SL'].copy()
+tp1_be_trades = df_trades[df_trades['exit_reason'] == 'TP1_Breakeven'].copy()
+tp2_trades = df_trades[df_trades['exit_reason'] == 'TP2_Full'].copy()
 
+print("=" * 80)
+print("1단계: 각 결과별 손익 분석")
+print("=" * 80)
+print()
 
-def analyze_entry_to_exit_behavior(df, trades):
-    """진입 후 가격 움직임 상세 분석"""
-    print("=" * 80)
-    print("실패 이유 분석 #1: 진입 후 가격 움직임")
-    print("=" * 80)
+print(f"🔴 SL 손절: {len(sl_trades)}개 (18.0%)")
+print(f"   총 손실: {sl_trades['pnl_pct'].sum():.2f}%")
+print(f"   평균 손실: {sl_trades['pnl_pct'].mean():.2f}%")
+print()
+
+print(f"🟡 TP1 Breakeven: {len(tp1_be_trades)}개 (36.3%)")
+print(f"   총 손익: {tp1_be_trades['pnl_pct'].sum():.2f}%")
+print(f"   평균 손익: {tp1_be_trades['pnl_pct'].mean():.2f}%")
+print()
+
+print(f"🟢 TP2 Full: {len(tp2_trades)}개 (45.7%)")
+print(f"   총 수익: {tp2_trades['pnl_pct'].sum():.2f}%")
+print(f"   평균 수익: {tp2_trades['pnl_pct'].mean():.2f}%")
+print()
+
+# Calculate net effect
+total_pnl = sl_trades['pnl_pct'].sum() + tp1_be_trades['pnl_pct'].sum() + tp2_trades['pnl_pct'].sum()
+print(f"📊 총합: {total_pnl:.2f}%")
+print()
+
+# Key insight
+print("💡 핵심 문제:")
+sl_loss = abs(sl_trades['pnl_pct'].sum())
+tp2_profit = tp2_trades['pnl_pct'].sum()
+tp1_profit = tp1_be_trades['pnl_pct'].sum()
+
+print(f"   SL 손실: -{sl_loss:.2f}%")
+print(f"   TP2 수익: +{tp2_profit:.2f}%")
+print(f"   TP1 수익: +{tp1_profit:.2f}%")
+print(f"   순손익: {tp2_profit + tp1_profit - sl_loss:.2f}%")
+print()
+
+if abs(sl_loss) > (tp2_profit + tp1_profit):
+    print("   ❌ SL 손실이 TP 수익보다 큼!")
+else:
+    print("   ✅ TP 수익이 SL 손실보다 큼")
+print()
+
+# Analyze TP1 Breakeven problem
+print("=" * 80)
+print("2단계: TP1 Breakeven 문제 분석")
+print("=" * 80)
+print()
+
+print(f"TP1 Breakeven {len(tp1_be_trades)}개 중:")
+print()
+
+# Calculate how much they earned at TP1 before going back to breakeven
+tp1_be_trades['tp1_profit_pct'] = (tp1_be_trades['tp2_price'] - tp1_be_trades['entry_price']) / tp1_be_trades['entry_price'] * 100
+
+# How close did they get to TP2?
+# We need to load candle data to check max price
+df_15m = pd.read_csv('btc_15m_ohlcv.csv')
+df_15m['datetime'] = pd.to_datetime(df_15m['datetime'])
+
+tp1_be_analysis = []
+
+for idx, trade in tp1_be_trades.head(50).iterrows():  # Sample 50 for speed
+    entry_time = trade['entry_time']
+    exit_time = trade['exit_time']
+    tp2_price = trade['tp2_price']
+    entry_price = trade['entry_price']
     
-    win_trades = trades[trades['pnl_pct'] > 0]
-    loss_trades = trades[trades['pnl_pct'] < 0]
+    # Get candles between entry and exit
+    candles_between = df_15m[(df_15m['datetime'] > entry_time) & (df_15m['datetime'] <= exit_time)]
     
-    print(f"\n[1] 승리 거래 vs 패배 거래 비교")
-    print(f"승리: {len(win_trades)}회 ({len(win_trades)/len(trades)*100:.1f}%)")
-    print(f"패배: {len(loss_trades)}회 ({len(loss_trades)/len(trades)*100:.1f}%)")
-    
-    # 진입 후 최대 상승/하락 분석
-    detailed_analysis = []
-    
-    for idx, trade in trades.iterrows():
-        entry_time = trade['entry_time']
-        exit_time = trade['exit_time']
-        entry_price = trade['entry_price']
+    if len(candles_between) > 0:
+        max_price = candles_between['high'].max()
+        distance_to_tp2_pct = (tp2_price - max_price) / entry_price * 100
+        reached_tp2_pct = (max_price - entry_price) / (tp2_price - entry_price) * 100 if tp2_price > entry_price else 0
         
-        # 해당 기간 데이터 추출
-        period_data = df[(df['datetime'] >= entry_time) & (df['datetime'] <= exit_time)]
-        
-        if len(period_data) == 0:
-            continue
-        
-        # 최대 상승/하락률 계산
-        max_high = period_data['high'].max()
-        min_low = period_data['low'].min()
-        
-        max_gain_pct = (max_high - entry_price) / entry_price * 100
-        max_loss_pct = (min_low - entry_price) / entry_price * 100
-        
-        # 첫 N봉 동안의 움직임
-        first_5_candles = period_data.head(5)
-        if len(first_5_candles) > 0:
-            first_5_max = first_5_candles['high'].max()
-            first_5_min = first_5_candles['low'].min()
-            first_5_gain = (first_5_max - entry_price) / entry_price * 100
-            first_5_loss = (first_5_min - entry_price) / entry_price * 100
-        else:
-            first_5_gain = 0
-            first_5_loss = 0
-        
-        # 즉시 반등 여부 (첫 3봉)
-        first_3_candles = period_data.head(3)
-        immediate_rally = False
-        if len(first_3_candles) >= 3:
-            green_count = sum(first_3_candles['close'] > first_3_candles['open'])
-            if green_count >= 2 and (first_3_candles.iloc[2]['close'] > entry_price * 1.005):
-                immediate_rally = True
-        
-        detailed_analysis.append({
-            'trade_idx': idx,
-            'pnl_pct': trade['pnl_pct'],
-            'exit_type': trade['exit_type'],
-            'consecutive_ll': trade['consecutive_ll'],
-            'max_gain_pct': max_gain_pct,
-            'max_loss_pct': max_loss_pct,
-            'first_5_gain': first_5_gain,
-            'first_5_loss': first_5_loss,
-            'immediate_rally': immediate_rally,
-            'tp1_hit': trade['tp1_hit']
+        tp1_be_analysis.append({
+            'entry_time': entry_time,
+            'max_price_reached': max_price,
+            'tp2_price': tp2_price,
+            'reached_tp2_pct': reached_tp2_pct,
+            'distance_to_tp2_pct': distance_to_tp2_pct
         })
-    
-    analysis_df = pd.DataFrame(detailed_analysis)
-    
-    print(f"\n[2] 진입 후 최대 상승/하락 분석")
-    print(f"\n전체 거래:")
-    print(f"  평균 최대 상승: {analysis_df['max_gain_pct'].mean():.2f}%")
-    print(f"  평균 최대 하락: {analysis_df['max_loss_pct'].mean():.2f}%")
-    print(f"  첫 5봉 평균 상승: {analysis_df['first_5_gain'].mean():.2f}%")
-    print(f"  첫 5봉 평균 하락: {analysis_df['first_5_loss'].mean():.2f}%")
-    
-    print(f"\n승리 거래:")
-    win_analysis = analysis_df[analysis_df['pnl_pct'] > 0]
-    print(f"  평균 최대 상승: {win_analysis['max_gain_pct'].mean():.2f}%")
-    print(f"  평균 최대 하락: {win_analysis['max_loss_pct'].mean():.2f}%")
-    print(f"  첫 5봉 평균 상승: {win_analysis['first_5_gain'].mean():.2f}%")
-    print(f"  첫 5봉 평균 하락: {win_analysis['first_5_loss'].mean():.2f}%")
-    
-    print(f"\n패배 거래:")
-    loss_analysis = analysis_df[analysis_df['pnl_pct'] <= 0]
-    print(f"  평균 최대 상승: {loss_analysis['max_gain_pct'].mean():.2f}%")
-    print(f"  평균 최대 하락: {loss_analysis['max_loss_pct'].mean():.2f}%")
-    print(f"  첫 5봉 평균 상승: {loss_analysis['first_5_gain'].mean():.2f}%")
-    print(f"  첫 5봉 평균 하락: {loss_analysis['first_5_loss'].mean():.2f}%")
-    
-    # 즉시 반등 분석
-    immediate_rally_count = analysis_df['immediate_rally'].sum()
-    print(f"\n[3] 즉시 반등 (첫 3봉 내 +0.5% 이상) 분석")
-    print(f"  즉시 반등 발생: {immediate_rally_count}회 ({immediate_rally_count/len(analysis_df)*100:.1f}%)")
-    print(f"  즉시 반등 없음: {len(analysis_df) - immediate_rally_count}회 ({(len(analysis_df) - immediate_rally_count)/len(analysis_df)*100:.1f}%)")
-    
-    return analysis_df
 
+df_tp1_be_analysis = pd.DataFrame(tp1_be_analysis)
 
-def analyze_sl_hits(df, trades):
-    """손절 발생 원인 분석"""
-    print("\n" + "=" * 80)
-    print("실패 이유 분석 #2: 손절 발생 원인")
-    print("=" * 80)
+if len(df_tp1_be_analysis) > 0:
+    avg_tp2_reached = df_tp1_be_analysis['reached_tp2_pct'].mean()
+    print(f"평균적으로 TP2의 {avg_tp2_reached:.1f}%까지 도달")
+    print()
     
-    sl_trades = trades[trades['exit_type'] == 'SL']
-    
-    print(f"\n총 {len(sl_trades)}회 손절 발생 ({len(sl_trades)/len(trades)*100:.1f}%)")
-    
-    # 손절까지 걸린 시간
-    print(f"\n[1] 손절까지 걸린 시간")
-    print(f"  평균: {sl_trades['duration_hours'].mean():.1f}시간")
-    print(f"  중앙값: {sl_trades['duration_hours'].median():.1f}시간")
-    print(f"  최소: {sl_trades['duration_hours'].min():.1f}시간")
-    print(f"  최대: {sl_trades['duration_hours'].max():.1f}시간")
-    
-    # 빠른 손절 (1시간 이내)
-    fast_sl = sl_trades[sl_trades['duration_hours'] < 1]
-    print(f"\n  1시간 이내 손절: {len(fast_sl)}회 ({len(fast_sl)/len(sl_trades)*100:.1f}%)")
-    
-    # 연속 LL별 손절률
-    print(f"\n[2] 연속 LL 카운트별 손절 발생률")
-    for ll_count in sorted(trades['consecutive_ll'].unique()):
-        subset = trades[trades['consecutive_ll'] == ll_count]
-        sl_subset = subset[subset['exit_type'] == 'SL']
-        sl_rate = len(sl_subset) / len(subset) * 100
-        print(f"  {ll_count}번 LL: {len(sl_subset)}/{len(subset)}회 ({sl_rate:.1f}%)")
-    
-    # 추가 하락 분석
-    print(f"\n[3] 진입 후 추가 하락 발생")
-    continued_drops = []
-    
-    for idx, trade in sl_trades.iterrows():
-        entry_time = trade['entry_time']
-        exit_time = trade['exit_time']
-        entry_price = trade['entry_price']
-        l_price = trade['l_price']
-        
-        # 해당 기간 데이터
-        period_data = df[(df['datetime'] >= entry_time) & (df['datetime'] <= exit_time)]
-        
-        if len(period_data) == 0:
-            continue
-        
-        min_low = period_data['low'].min()
-        additional_drop = (min_low - l_price) / l_price * 100
-        
-        continued_drops.append({
-            'entry_price': entry_price,
-            'l_price': l_price,
-            'min_low': min_low,
-            'additional_drop_pct': additional_drop,
-            'consecutive_ll': trade['consecutive_ll']
-        })
-    
-    drop_df = pd.DataFrame(continued_drops)
-    print(f"\n  평균 추가 하락 (L값 대비): {drop_df['additional_drop_pct'].mean():.2f}%")
-    print(f"  중앙값 추가 하락: {drop_df['additional_drop_pct'].median():.2f}%")
-    print(f"  최대 추가 하락: {drop_df['additional_drop_pct'].min():.2f}%")
-    
-    return sl_trades, drop_df
+    # How many got close to TP2?
+    close_to_tp2 = len(df_tp1_be_analysis[df_tp1_be_analysis['reached_tp2_pct'] >= 90])
+    print(f"TP2 90% 이상 근접: {close_to_tp2}개 ({close_to_tp2/len(df_tp1_be_analysis)*100:.1f}%)")
+    print(f"   → TP2 거의 도달했는데 브레이크이븐으로 끝남")
+    print(f"   → **SL을 브레이크이븐으로 이동 타이밍 문제!**")
+    print()
 
+# Analyze by year
+print("=" * 80)
+print("3단계: 연도별 실패 사유")
+print("=" * 80)
+print()
 
-def analyze_false_bottom_signals(df, trades):
-    """거짓 바닥 신호 분석"""
-    print("\n" + "=" * 80)
-    print("실패 이유 분석 #3: 거짓 바닥 신호 (False Bottom)")
-    print("=" * 80)
+for year in sorted(df_trades['year'].unique()):
+    year_trades = df_trades[df_trades['year'] == year]
+    year_sl = year_trades[year_trades['exit_reason'] == 'SL']
+    year_tp1 = year_trades[year_trades['exit_reason'] == 'TP1_Breakeven']
+    year_tp2 = year_trades[year_trades['exit_reason'] == 'TP2_Full']
     
-    # 패배 거래 중 TP1조차 도달하지 못한 경우
-    failed_tp1 = trades[(trades['pnl_pct'] < 0) & (trades['tp1_hit'] == False)]
+    total_pnl = year_trades['pnl_pct'].sum()
     
-    print(f"\n[1] TP1 미달성 실패 거래")
-    print(f"  총 {len(failed_tp1)}회 ({len(failed_tp1)/len(trades)*100:.1f}%)")
-    print(f"  평균 PNL: {failed_tp1['pnl_pct'].mean():.2f}%")
-    
-    # 진입 후 즉시 하락
-    print(f"\n[2] 진입 타이밍 문제 분석")
-    
-    early_entries = []
-    
-    for idx, trade in failed_tp1.iterrows():
-        entry_time = trade['entry_time']
-        entry_price = trade['entry_price']
-        
-        # 진입 후 10봉 데이터
-        entry_idx = df[df['datetime'] == entry_time].index
-        if len(entry_idx) == 0:
-            continue
-        
-        entry_idx = entry_idx[0]
-        next_10 = df.iloc[entry_idx:entry_idx+10]
-        
-        if len(next_10) == 0:
-            continue
-        
-        # 즉시 하락 체크
-        first_candle_drop = (next_10.iloc[0]['low'] - entry_price) / entry_price * 100
-        min_in_10 = next_10['low'].min()
-        max_drop_10 = (min_in_10 - entry_price) / entry_price * 100
-        
-        early_entries.append({
-            'consecutive_ll': trade['consecutive_ll'],
-            'first_candle_drop': first_candle_drop,
-            'max_drop_10': max_drop_10,
-            'pnl': trade['pnl_pct']
-        })
-    
-    early_df = pd.DataFrame(early_entries)
-    
-    if len(early_df) > 0:
-        print(f"\n  첫 봉 평균 하락: {early_df['first_candle_drop'].mean():.2f}%")
-        print(f"  10봉 내 최대 하락: {early_df['max_drop_10'].mean():.2f}%")
-        
-        # 즉시 하락한 거래 비율
-        immediate_drop = early_df[early_df['first_candle_drop'] < -0.5]
-        print(f"  첫 봉부터 -0.5% 이상 하락: {len(immediate_drop)}회 ({len(immediate_drop)/len(early_df)*100:.1f}%)")
-    
-    return failed_tp1, early_df
+    print(f"{year}년: 총 {total_pnl:+.2f}%")
+    print(f"   거래: {len(year_trades)}개")
+    print(f"   SL: {len(year_sl)}개 ({len(year_sl)/len(year_trades)*100:.1f}%) → {year_sl['pnl_pct'].sum():.2f}%")
+    print(f"   TP1 BE: {len(year_tp1)}개 ({len(year_tp1)/len(year_trades)*100:.1f}%) → {year_tp1['pnl_pct'].sum():.2f}%")
+    print(f"   TP2: {len(year_tp2)}개 ({len(year_tp2)/len(year_trades)*100:.1f}%) → {year_tp2['pnl_pct'].sum():.2f}%")
+    print()
 
+# Analyze 2021 specifically
+print("=" * 80)
+print("4단계: 2021년 폭망 사유 집중 분석")
+print("=" * 80)
+print()
 
-def analyze_time_stop_trades(df, trades):
-    """타임스톱 거래 분석"""
-    print("\n" + "=" * 80)
-    print("실패 이유 분석 #4: 타임스톱 거래 분석")
-    print("=" * 80)
+year_2021 = df_trades[df_trades['year'] == 2021]
+print(f"2021년 총 손실: {year_2021['pnl_pct'].sum():.2f}%")
+print(f"2021년 거래: {len(year_2021)}개")
+print()
+
+print("2021년 특징:")
+sl_2021 = year_2021[year_2021['exit_reason'] == 'SL']
+tp1_2021 = year_2021[year_2021['exit_reason'] == 'TP1_Breakeven']
+tp2_2021 = year_2021[year_2021['exit_reason'] == 'TP2_Full']
+
+print(f"   SL: {len(sl_2021)}개 ({len(sl_2021)/len(year_2021)*100:.1f}%) → {sl_2021['pnl_pct'].sum():.2f}%")
+print(f"   TP1 BE: {len(tp1_2021)}개 ({len(tp1_2021)/len(year_2021)*100:.1f}%) → {tp1_2021['pnl_pct'].sum():.2f}%")
+print(f"   TP2: {len(tp2_2021)}개 ({len(tp2_2021)/len(year_2021)*100:.1f}%) → {tp2_2021['pnl_pct'].sum():.2f}%")
+print()
+
+# Compare with other years
+other_years = df_trades[df_trades['year'] != 2021]
+print("다른 연도 평균:")
+print(f"   SL 비율: {len(other_years[other_years['exit_reason'] == 'SL'])/len(other_years)*100:.1f}%")
+print(f"   TP2 비율: {len(other_years[other_years['exit_reason'] == 'TP2_Full'])/len(other_years)*100:.1f}%")
+print()
+
+# Power score analysis
+print("=" * 80)
+print("5단계: Power Score vs 실제 결과")
+print("=" * 80)
+print()
+
+for score in sorted(df_trades['power_score'].unique()):
+    score_trades = df_trades[df_trades['power_score'] == score]
+    score_sl = score_trades[score_trades['exit_reason'] == 'SL']
+    score_tp2 = score_trades[score_trades['exit_reason'] == 'TP2_Full']
     
-    time_trades = trades[trades['exit_type'] == 'TIME']
+    avg_pnl = score_trades['pnl_pct'].mean()
+    total_pnl = score_trades['pnl_pct'].sum()
     
-    print(f"\n총 {len(time_trades)}회 타임스톱 ({len(time_trades)/len(trades)*100:.1f}%)")
-    print(f"평균 PNL: {time_trades['pnl_pct'].mean():.2f}%")
-    
-    # 타임스톱 중 수익/손실
-    time_profit = time_trades[time_trades['pnl_pct'] > 0]
-    time_loss = time_trades[time_trades['pnl_pct'] < 0]
-    
-    print(f"\n[1] 타임스톱 수익/손실 분포")
-    print(f"  수익: {len(time_profit)}회 ({len(time_profit)/len(time_trades)*100:.1f}%) - 평균 {time_profit['pnl_pct'].mean():.2f}%")
-    print(f"  손실: {len(time_loss)}회 ({len(time_loss)/len(time_trades)*100:.1f}%) - 평균 {time_loss['pnl_pct'].mean():.2f}%")
-    
-    # 타임스톱 발생 시 TP1 달성 여부
-    time_with_tp1 = time_trades[time_trades['tp1_hit'] == True]
-    time_without_tp1 = time_trades[time_trades['tp1_hit'] == False]
-    
-    print(f"\n[2] 타임스톱 시 TP1 달성 여부")
-    print(f"  TP1 달성 후 타임스톱: {len(time_with_tp1)}회 - 평균 PNL {time_with_tp1['pnl_pct'].mean():.2f}%")
-    print(f"  TP1 미달성 타임스톱: {len(time_without_tp1)}회 - 평균 PNL {time_without_tp1['pnl_pct'].mean():.2f}%")
-    
-    print(f"\n[3] 타임스톱 원인 분석")
-    print(f"  → 24시간 내 TP2 (+3.5%)에 도달하지 못함")
-    print(f"  → 상승 속도 부족 또는 횡보")
+    print(f"Score {score}점 ({len(score_trades)}개):")
+    print(f"   총 PnL: {total_pnl:+.2f}% | 평균 PnL: {avg_pnl:+.2f}%")
+    print(f"   SL: {len(score_sl)}개 ({len(score_sl)/len(score_trades)*100:.1f}%)")
+    print(f"   TP2: {len(score_tp2)}개 ({len(score_tp2)/len(score_trades)*100:.1f}%)")
+    print()
 
+# Final diagnosis
+print("=" * 80)
+print("🎯 최종 진단: 실패 사유")
+print("=" * 80)
+print()
 
-def analyze_winning_trades(df, trades):
-    """승리 거래의 특징 분석"""
-    print("\n" + "=" * 80)
-    print("성공 패턴 분석: 승리 거래의 특징")
-    print("=" * 80)
-    
-    win_trades = trades[trades['pnl_pct'] > 0]
-    
-    print(f"\n총 {len(win_trades)}회 승리 ({len(win_trades)/len(trades)*100:.1f}%)")
-    print(f"평균 PNL: {win_trades['pnl_pct'].mean():.2f}%")
-    
-    # 청산 타입별
-    print(f"\n[1] 승리 거래 청산 타입")
-    for exit_type in win_trades['exit_type'].unique():
-        subset = win_trades[win_trades['exit_type'] == exit_type]
-        print(f"  {exit_type}: {len(subset)}회 - 평균 PNL {subset['pnl_pct'].mean():.2f}%")
-    
-    # 연속 LL별
-    print(f"\n[2] 승리 거래의 연속 LL 분포")
-    for ll_count in sorted(win_trades['consecutive_ll'].unique()):
-        subset = win_trades[win_trades['consecutive_ll'] == ll_count]
-        print(f"  {ll_count}번 LL: {len(subset)}회 - 평균 PNL {subset['pnl_pct'].mean():.2f}%")
-    
-    # TP2 달성 거래
-    tp2_trades = win_trades[win_trades['exit_type'] == 'TP2']
-    print(f"\n[3] TP2 완전 달성 거래")
-    print(f"  총 {len(tp2_trades)}회")
-    print(f"  평균 소요 시간: {tp2_trades['duration_hours'].mean():.1f}시간")
-    print(f"  연속 LL 분포:")
-    for ll_count in sorted(tp2_trades['consecutive_ll'].unique()):
-        count = len(tp2_trades[tp2_trades['consecutive_ll'] == ll_count])
-        print(f"    {ll_count}번 LL: {count}회")
+print("1️⃣ **TP1 Breakeven 문제** (36.3%, -25.89%)")
+print(f"   - TP1 도달 후 브레이크이븐으로 SL 이동")
+print(f"   - 평균 TP2의 {avg_tp2_reached:.1f}%까지만 도달")
+print(f"   - TP2 거의 도달했는데 되돌아옴")
+print(f"   → 해결책: SL 브레이크이븐 이동 타이밍 지연 or TP1 익절 비중 ↑")
+print()
 
+print("2️⃣ **2021년 특이 시장** (-25.22%)")
+print(f"   - 51개 거래 중 SL {len(sl_2021)}개, TP2 {len(tp2_2021)}개")
+print(f"   - 전체 손실의 48% 차지")
+print(f"   → 해결책: 2021년 필터링 or 변동성 필터 추가")
+print()
 
-def final_summary():
-    """최종 요약 및 결론"""
-    print("\n" + "=" * 80)
-    print("최종 결론: 전략 실패 이유 요약")
-    print("=" * 80)
-    
-    print("""
-🔴 전략 실패의 주요 원인 5가지:
+print("3️⃣ **Power Score 역설** (높을수록 손실)")
+print(f"   - 10점: 5개, 평균 -0.77%")
+print(f"   - 3점: 100개, 평균 -0.04%")
+print(f"   → 해결책: Power score 계산 방식 재검토")
+print()
 
-1. **거짓 바닥 신호 (False Bottom)**
-   - L값이 실제 바닥이 아닌 경우가 많음
-   - 진입 후 추가 하락 발생
-   - 3-4번 LL도 충분한 하락이 아님
+print("4️⃣ **TP/SL 비율 문제**")
+print(f"   - SL 손실: {sl_loss:.2f}%")
+print(f"   - TP 수익: {tp2_profit + tp1_profit:.2f}%")
+print(f"   - 차이: {tp2_profit + tp1_profit - sl_loss:.2f}%")
+print(f"   → 해결책: TP1 비중 70% or 전량 TP1 익절")
+print()
 
-2. **손절 발생률 46.7%**
-   - 거의 절반의 거래가 손절
-   - 평균 -2.00% 손실
-   - L값 -0.5% SL이 너무 타이트
+# Save detailed analysis
+sl_trades.to_csv('failure_sl_trades.csv', index=False)
+tp1_be_trades.to_csv('failure_tp1_breakeven_trades.csv', index=False)
 
-3. **즉시 반등 부족**
-   - 진입 후 즉각적인 반등이 없음
-   - 첫 5봉 평균 상승이 미미
-   - 횡보 또는 추가 하락 지속
+print("✅ 상세 분석 저장:")
+print("   - failure_sl_trades.csv (SL 케이스)")
+print("   - failure_tp1_breakeven_trades.csv (TP1 BE 케이스)")
 
-4. **상승 모멘텀 부족**
-   - 타임스톡 30.4% 발생
-   - 24시간 내 TP2 도달 실패
-   - 반등 속도가 너무 느림
-
-5. **진입 타이밍 문제**
-   - "첫 양봉" 조건이 너무 이름
-   - 실제 반등 시작점을 놓침
-   - 더 강한 확인 신호 필요
-
-📊 개선이 필요한 핵심 요소:
-
-✅ **연속 LL 카운트를 5번 이상으로 상향**
-   → 더 깊은 하락 후 진입
-
-✅ **진입 조건 강화**
-   → RSI 다이버전스, 볼륨 급증, MACD 전환 확인
-
-✅ **손절폭 확대**
-   → L값 -0.5% → -1.0% 또는 -1.5%
-
-✅ **타임프레임 상승**
-   → 15분봉 → 1시간봉 or 4시간봉
-
-✅ **추가 확인 신호**
-   → 2-3개 양봉 연속 + RSI > 40 + MACD Hist 상승
-""")
-
-
-def main():
-    print("=" * 80)
-    print("Floor Catch Strategy - 실패 이유 심층 분석")
-    print("=" * 80)
-    
-    # 데이터 로드
-    df, trades = load_data()
-    df = calculate_indicators(df)
-    
-    print(f"\n분석 기간: {df.iloc[0]['datetime']} ~ {df.iloc[-1]['datetime']}")
-    print(f"총 거래 수: {len(trades)}")
-    print(f"승률: {len(trades[trades['pnl_pct'] > 0]) / len(trades) * 100:.1f}%")
-    print(f"총 PNL: {trades['pnl_pct'].sum():.2f}%")
-    
-    # 분석 실행
-    analysis_df = analyze_entry_to_exit_behavior(df, trades)
-    sl_trades, drop_df = analyze_sl_hits(df, trades)
-    failed_tp1, early_df = analyze_false_bottom_signals(df, trades)
-    analyze_time_stop_trades(df, trades)
-    analyze_winning_trades(df, trades)
-    
-    # 최종 요약
-    final_summary()
-    
-    # 상세 분석 결과 저장
-    analysis_df.to_csv('failure_analysis_detailed.csv', index=False)
-    print(f"\n✅ 상세 분석 저장: failure_analysis_detailed.csv")
-
-
-if __name__ == "__main__":
-    main()
