@@ -1,201 +1,258 @@
+"""
+빠른 분할 익절 전략 최적화 - 벡터화 연산 활용
+"""
+
 import pandas as pd
 import numpy as np
+from datetime import datetime, timedelta
+import warnings
+warnings.filterwarnings('ignore')
 
 # 데이터 로드
-df_15m = pd.read_csv('btc_15m_ohlcv.csv')
-df_4h = pd.read_csv('btc_4h_ohlcv.csv')
+signals = pd.read_csv('valid_signals.csv')
+df_15m = pd.read_csv('analysis_15m.csv')
+
+# 시간 컬럼 변환
+signals['breakout_time'] = pd.to_datetime(signals['breakout_time'])
+signals['h1_time'] = pd.to_datetime(signals['h1_time'])
+signals['h2_time'] = pd.to_datetime(signals['h2_time'])
 
 df_15m['datetime'] = pd.to_datetime(df_15m['datetime'])
-df_4h['datetime'] = pd.to_datetime(df_4h['datetime'])
+df_15m = df_15m.sort_values('datetime').reset_index(drop=True)
 
-# 인덱스 설정으로 검색 최적화
-df_15m = df_15m.set_index('datetime').sort_index()
+print("="*80)
+print("분할 익절 전략 빠른 최적화")
+print("="*80)
+print(f"시그널: {len(signals)}개, 15분봉: {len(df_15m)}개")
 
-# 4H FVG 감지 (벡터화)
-def detect_4h_fvg_fast(df):
-    df = df.copy()
-    df['prev2_high'] = df['high'].shift(2)
-    df['body_size'] = abs(df['close'] - df['open']) / df['open'] * 100
+# 각 시그널별로 미래 가격 데이터 미리 계산
+def precompute_future_data(signals, df_15m, max_hours=72):
+    """각 시그널별 미래 데이터 사전 계산"""
+    all_future = {}
     
-    # 상승 FVG 조건
-    mask = df['prev2_high'] < df['low']
-    fvg_df = df[mask].copy()
-    fvg_df['fvg_top'] = fvg_df['low']
-    fvg_df['fvg_bottom'] = fvg_df['prev2_high']
-    fvg_df['fvg_size'] = (fvg_df['fvg_top'] - fvg_df['fvg_bottom']) / fvg_df['fvg_bottom'] * 100
+    for idx, signal in signals.iterrows():
+        entry_time = signal['breakout_time']
+        future = df_15m[df_15m['datetime'] > entry_time].head(max_hours * 4)
+        
+        if len(future) > 0:
+            # 필요한 컬럼만 numpy array로 변환
+            all_future[idx] = {
+                'times': (future['datetime'] - entry_time).dt.total_seconds().values / 3600,
+                'highs': future['high'].values,
+                'lows': future['low'].values,
+                'closes': future['close'].values
+            }
     
-    return fvg_df[['fvg_top', 'fvg_bottom', 'fvg_size', 'body_size']].reset_index()
+    return all_future
 
-fvg_df = detect_4h_fvg_fast(df_4h)
-print(f"감지된 4H FVG: {len(fvg_df)}개\n")
+print("\n미래 데이터 사전 계산 중...")
+future_data_cache = precompute_future_data(signals, df_15m)
+print(f"캐시 완료: {len(future_data_cache)}개 시그널")
 
-# 빠른 시뮬레이션
-def simulate_fast(fvg_df, df_15m, tp_pct, sl_pct, min_body=0):
-    trades = []
+def run_backtest_fast(signals_df, future_cache, tp1_ratio, tp2_ratio, split_ratio, 
+                       sl_buffer_pct, use_trailing_sl, max_hold_hours):
+    """최적화된 백테스트"""
     
-    filtered = fvg_df[fvg_df['body_size'] >= min_body] if min_body > 0 else fvg_df
+    results = []
     
-    for _, fvg in filtered.iterrows():
-        fvg_time = fvg['datetime']
-        fvg_top = fvg['fvg_top']
+    for idx, signal in signals_df.iterrows():
+        if idx not in future_cache:
+            continue
+            
+        entry_price = signal['breakout_price']
+        h1_price = signal['h1_price']
+        h2_price = signal['h2_price']
+        hl_price = signal['hl_price']
         
-        try:
-            future = df_15m.loc[fvg_time:].iloc[1:201]
-        except:
+        # 트렌드라인 높이
+        tl_height = abs(h1_price - h2_price)
+        
+        # TP/SL 목표
+        tp1_target = entry_price + tl_height * tp1_ratio
+        tp2_target = entry_price + tl_height * tp2_ratio
+        sl_price = hl_price * (1 - sl_buffer_pct / 100)
+        
+        if sl_price >= entry_price:
+            sl_price = entry_price * 0.99
+        
+        # 캐시된 데이터
+        cache = future_cache[idx]
+        times = cache['times']
+        highs = cache['highs']
+        lows = cache['lows']
+        closes = cache['closes']
+        
+        # 시간 제한 적용
+        valid_mask = times <= max_hold_hours
+        times = times[valid_mask]
+        highs = highs[valid_mask]
+        lows = lows[valid_mask]
+        closes = closes[valid_mask]
+        
+        if len(times) == 0:
             continue
         
-        if len(future) < 10:
-            continue
+        # 시뮬레이션
+        position = 1.0
+        total_pnl = 0
+        tp1_done = False
+        tp2_done = False
+        sl_done = False
+        current_sl = sl_price
         
-        # FVG 터치 찾기
-        touch_mask = future['low'] <= fvg_top
-        if not touch_mask.any():
-            continue
-        
-        touch_idx = touch_mask.idxmax()
-        touch_pos = future.index.get_loc(touch_idx)
-        
-        if touch_pos + 1 >= len(future):
-            continue
-        
-        entry_row = future.iloc[touch_pos + 1]
-        entry_price = entry_row['open']
-        entry_time = future.index[touch_pos + 1]
-        
-        tp_price = entry_price * (1 + tp_pct / 100)
-        sl_price = entry_price * (1 + sl_pct / 100)
-        
-        # 결과 판정
-        after = future.iloc[touch_pos + 2:]
-        if len(after) == 0:
-            continue
-        
-        result = None
-        for idx, row in after.iterrows():
-            if row['low'] <= sl_price:
-                result = 'loss'
+        for i in range(len(times)):
+            # 손절 체크
+            if lows[i] <= current_sl and position > 0:
+                sl_pnl = (current_sl - entry_price) / entry_price * 100 * position
+                total_pnl += sl_pnl
+                sl_done = True
+                position = 0
                 break
-            if row['high'] >= tp_price:
-                result = 'win'
+            
+            # TP1 체크
+            if not tp1_done and highs[i] >= tp1_target and position > 0:
+                tp1_pnl = (tp1_target - entry_price) / entry_price * 100 * split_ratio
+                total_pnl += tp1_pnl
+                position -= split_ratio
+                tp1_done = True
+                
+                if use_trailing_sl:
+                    current_sl = entry_price
+            
+            # TP2 체크
+            if not tp2_done and highs[i] >= tp2_target and position > 0:
+                tp2_pnl = (tp2_target - entry_price) / entry_price * 100 * position
+                total_pnl += tp2_pnl
+                position = 0
+                tp2_done = True
                 break
         
-        if result:
-            trades.append({
-                'time': entry_time,
-                'result': result,
-                'pnl': tp_pct if result == 'win' else sl_pct
-            })
+        # 잔여 포지션 청산
+        if position > 0 and len(closes) > 0:
+            pnl = (closes[-1] - entry_price) / entry_price * 100 * position
+            total_pnl += pnl
+        
+        results.append({
+            'total_pnl': total_pnl,
+            'tp1_done': tp1_done,
+            'tp2_done': tp2_done,
+            'sl_done': sl_done
+        })
     
-    return trades
+    return pd.DataFrame(results)
 
-def calc_stats(trades):
-    if not trades:
-        return None
-    
-    wins = sum(1 for t in trades if t['result'] == 'win')
-    wr = wins / len(trades) * 100
-    
-    # MDD
-    cum = 0
-    peak = 0
-    mdd = 0
-    for t in trades:
-        cum += t['pnl']
-        peak = max(peak, cum)
-        mdd = min(mdd, cum - peak)
-    
-    total_pnl = sum(t['pnl'] for t in trades)
-    
-    # 월별
-    df = pd.DataFrame(trades)
-    df['month'] = pd.to_datetime(df['time']).dt.to_period('M')
-    monthly = df.groupby('month')['pnl'].sum()
-    
-    return {
-        'trades': len(trades),
-        'wr': wr,
-        'total_pnl': total_pnl,
-        'mdd': mdd,
-        'efficiency': total_pnl / abs(mdd) if mdd != 0 else 0,
-        'monthly_avg': monthly.mean(),
-        'monthly_trades': len(trades) / len(monthly) if len(monthly) > 0 else 0
-    }
+# 최적화 실행
+print("\n" + "="*80)
+print("파라미터 최적화 시작")
+print("="*80)
 
-print("=" * 70)
-print("🔍 MDD 줄이고 수익 늘리기 - 최적화 분석")
-print("=" * 70)
+# 축소된 파라미터
+tp1_ratios = [0.2, 0.3, 0.5, 0.7]
+tp2_ratios = [0.5, 1.0, 1.5, 2.0, 3.0]
+split_ratios = [0.3, 0.5, 0.7]
+sl_buffers = [0.3, 0.5, 1.0, 1.5]
+trailing_options = [False, True]
+max_hold_options = [24, 48, 72]
 
-# 현재 전략
-print("\n[현재 전략] TP 1.0% / SL -1.5%")
-base = calc_stats(simulate_fast(fvg_df, df_15m, 1.0, -1.5))
-if base:
-    print(f"  거래: {base['trades']}회, 승률: {base['wr']:.1f}%, 총PnL: {base['total_pnl']:.1f}%")
-    print(f"  MDD: {base['mdd']:.1f}%, 효율: {base['efficiency']:.1f}, 월평균: {base['monthly_avg']:.2f}%")
+optimization_results = []
+count = 0
 
-# 방법 1: TP/SL 조정
-print("\n" + "=" * 70)
-print("📊 방법 1: TP/SL 비율 조정")
-print("=" * 70)
-print(f"\n{'TP':>5} {'SL':>5} {'거래':>5} {'승률':>6} {'총PnL':>7} {'MDD':>6} {'효율':>6} {'월평균':>7}")
-print("-" * 60)
+for tp1_r in tp1_ratios:
+    for tp2_r in tp2_ratios:
+        if tp2_r <= tp1_r:
+            continue
+        for split_r in split_ratios:
+            for sl_buf in sl_buffers:
+                for trailing in trailing_options:
+                    for max_hold in max_hold_options:
+                        count += 1
+                        
+                        result_df = run_backtest_fast(
+                            signals, future_data_cache, 
+                            tp1_r, tp2_r, split_r, sl_buf, trailing, max_hold
+                        )
+                        
+                        if len(result_df) == 0:
+                            continue
+                        
+                        optimization_results.append({
+                            'tp1_ratio': tp1_r,
+                            'tp2_ratio': tp2_r,
+                            'split_ratio': split_r,
+                            'sl_buffer_pct': sl_buf,
+                            'use_trailing': trailing,
+                            'max_hold_hours': max_hold,
+                            'signals': len(result_df),
+                            'tp1_rate': result_df['tp1_done'].mean() * 100,
+                            'tp2_rate': result_df['tp2_done'].mean() * 100,
+                            'sl_rate': result_df['sl_done'].mean() * 100,
+                            'win_rate': (result_df['total_pnl'] > 0).mean() * 100,
+                            'avg_pnl': result_df['total_pnl'].mean(),
+                            'total_pnl': result_df['total_pnl'].sum()
+                        })
 
-results1 = []
-for tp in [1.0, 1.5, 2.0, 2.5, 3.0]:
-    for sl in [-0.5, -1.0, -1.5, -2.0]:
-        s = calc_stats(simulate_fast(fvg_df, df_15m, tp, sl))
-        if s and s['trades'] > 50:
-            results1.append({'tp': tp, 'sl': sl, **s})
+print(f"\n총 {count}개 조합 테스트 완료")
 
-results1.sort(key=lambda x: x['efficiency'], reverse=True)
-for r in results1[:8]:
-    print(f"{r['tp']:>5.1f} {r['sl']:>5.1f} {r['trades']:>5} {r['wr']:>5.1f}% {r['total_pnl']:>6.1f}% {r['mdd']:>5.1f}% {r['efficiency']:>6.1f} {r['monthly_avg']:>6.2f}%")
+opt_df = pd.DataFrame(optimization_results)
+opt_df = opt_df.sort_values('avg_pnl', ascending=False)
 
-# 방법 2: 몸통 필터
-print("\n" + "=" * 70)
-print("📊 방법 2: 4H 몸통 필터 (TP 1.0% / SL -1.5%)")
-print("=" * 70)
-print(f"\n{'몸통':>6} {'거래':>5} {'승률':>6} {'총PnL':>7} {'MDD':>6} {'효율':>6} {'월평균':>7}")
-print("-" * 60)
+# 결과 출력
+print("\n" + "="*80)
+print("🏆 TOP 15 (평균 수익 기준)")
+print("="*80)
 
-for body in [0, 1.0, 1.5, 2.0, 2.5, 3.0]:
-    s = calc_stats(simulate_fast(fvg_df, df_15m, 1.0, -1.5, body))
-    if s and s['trades'] > 15:
-        print(f"{body:>5.1f}% {s['trades']:>5} {s['wr']:>5.1f}% {s['total_pnl']:>6.1f}% {s['mdd']:>5.1f}% {s['efficiency']:>6.1f} {s['monthly_avg']:>6.2f}%")
+for i, row in opt_df.head(15).iterrows():
+    print(f"\nTP1: {row['tp1_ratio']*100:.0f}% | TP2: {row['tp2_ratio']*100:.0f}% | Split: {row['split_ratio']*100:.0f}%")
+    print(f"  SL버퍼: {row['sl_buffer_pct']:.1f}% | Trailing: {row['use_trailing']} | 보유: {row['max_hold_hours']}h")
+    print(f"  TP1: {row['tp1_rate']:.1f}% | TP2: {row['tp2_rate']:.1f}% | SL: {row['sl_rate']:.1f}%")
+    print(f"  승률: {row['win_rate']:.1f}% | 평균: {row['avg_pnl']:+.2f}% | 총: {row['total_pnl']:+.1f}%")
 
-# 방법 3: 복합 조건
-print("\n" + "=" * 70)
-print("📊 방법 3: 복합 최적화 (몸통 + TP/SL)")
-print("=" * 70)
-print(f"\n{'조건':>25} {'거래':>5} {'승률':>6} {'총PnL':>7} {'MDD':>6} {'효율':>6} {'월평균':>7}")
-print("-" * 80)
+# 승률 기준
+print("\n" + "="*80)
+print("🎯 TOP 10 (승률 기준)")
+print("="*80)
 
-best = []
-for body in [1.0, 1.5, 2.0]:
-    for tp in [1.5, 2.0, 2.5, 3.0]:
-        for sl in [-1.0, -1.5, -2.0]:
-            s = calc_stats(simulate_fast(fvg_df, df_15m, tp, sl, body))
-            if s and s['trades'] > 15:
-                label = f"몸통{body}%+ TP{tp}% SL{sl}%"
-                best.append({'label': label, **s})
+for i, row in opt_df.sort_values('win_rate', ascending=False).head(10).iterrows():
+    print(f"\nTP1: {row['tp1_ratio']*100:.0f}% | TP2: {row['tp2_ratio']*100:.0f}% | Split: {row['split_ratio']*100:.0f}%")
+    print(f"  승률: {row['win_rate']:.1f}% | 평균: {row['avg_pnl']:+.2f}%")
 
-best.sort(key=lambda x: x['efficiency'], reverse=True)
-for r in best[:10]:
-    print(f"{r['label']:>25} {r['trades']:>5} {r['wr']:>5.1f}% {r['total_pnl']:>6.1f}% {r['mdd']:>5.1f}% {r['efficiency']:>6.1f} {r['monthly_avg']:>6.2f}%")
+# 최종 추천
+print("\n" + "="*80)
+print("🏆 최종 추천")
+print("="*80)
 
-# 최종 비교
-print("\n" + "=" * 70)
-print("🏆 현재 vs 최적 전략 비교")
-print("=" * 70)
+# 필터: 승률 50%+, 평균수익 0.5%+
+filtered = opt_df[(opt_df['win_rate'] >= 50) & (opt_df['avg_pnl'] >= 0.5)]
+if len(filtered) > 0:
+    best = filtered.sort_values('avg_pnl', ascending=False).iloc[0]
+    print("\n✅ 균형 조건 (승률 50%+, 평균 0.5%+)")
+else:
+    best = opt_df.iloc[0]
+    print("\n✅ 평균 수익 최고")
 
-if best and base:
-    top = best[0]
-    print(f"\n{'지표':<15} {'현재전략':>12} {'최적전략':>12} {'개선':>10}")
-    print("-" * 55)
-    print(f"{'거래 수':<15} {base['trades']:>12} {top['trades']:>12}")
-    print(f"{'승률':<15} {base['wr']:>11.1f}% {top['wr']:>11.1f}% {top['wr']-base['wr']:>+9.1f}%p")
-    print(f"{'총 PnL':<15} {base['total_pnl']:>11.1f}% {top['total_pnl']:>11.1f}% {top['total_pnl']-base['total_pnl']:>+9.1f}%")
-    print(f"{'MDD':<15} {base['mdd']:>11.1f}% {top['mdd']:>11.1f}% {top['mdd']-base['mdd']:>+9.1f}%")
-    print(f"{'효율(PnL/MDD)':<15} {base['efficiency']:>12.1f} {top['efficiency']:>12.1f} {top['efficiency']-base['efficiency']:>+10.1f}")
-    print(f"{'월평균 수익':<15} {base['monthly_avg']:>11.2f}% {top['monthly_avg']:>11.2f}% {top['monthly_avg']-base['monthly_avg']:>+9.2f}%")
-    print(f"\n🎯 최적 전략: {top['label']}")
+print(f"\n   TP1: 트렌드라인 높이 × {best['tp1_ratio']*100:.0f}%")
+print(f"   TP2: 트렌드라인 높이 × {best['tp2_ratio']*100:.0f}%")
+print(f"   분할: TP1에서 {best['split_ratio']*100:.0f}% 매도")
+print(f"   SL: HL 가격 -{best['sl_buffer_pct']:.1f}%")
+print(f"   Trailing: {best['use_trailing']}")
+print(f"   최대 보유: {best['max_hold_hours']}h")
+print(f"\n   ═══ 결과 ═══")
+print(f"   TP1 달성: {best['tp1_rate']:.1f}%")
+print(f"   TP2 달성: {best['tp2_rate']:.1f}%")
+print(f"   손절률: {best['sl_rate']:.1f}%")
+print(f"   승률: {best['win_rate']:.1f}%")
+print(f"   평균 수익: {best['avg_pnl']:+.2f}%")
+print(f"   총 수익: {best['total_pnl']:+.1f}%")
+
+# 저장
+opt_df.to_csv('partial_tp_optimization.csv', index=False)
+print(f"\n결과 저장: partial_tp_optimization.csv ({len(opt_df)}개 조합)")
+
+# 비교
+print("\n" + "="*80)
+print("📊 기존 대비 비교")
+print("="*80)
+print(f"\n기존 (TP 5% / SL 2%): TP달성 17.3%, 평균 +0.60%")
+print(f"최적화: TP1달성 {best['tp1_rate']:.1f}%, 평균 {best['avg_pnl']:+.2f}%")
+print(f"개선: TP달성 {best['tp1_rate']/17.3*100-100:+.0f}%, 평균수익 {(best['avg_pnl']/0.6-1)*100:+.0f}%")
 
