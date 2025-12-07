@@ -1,0 +1,2 @@
+analysis_time,current_price,weekly_trend,daily_trend,h1_trend,allow_long,allow_short,trade_type
+2025-11-24 00:15:00,85956.9,downtrend_broken,downtrend,downtrend_broken,False,True,ultra_scalp_short
